@@ -905,6 +905,39 @@ def test_a_claude_side_call_attaches_none_of_the_persons_mcp_servers(monkeypatch
     assert "--strict-mcp-config" not in seen["cmd"] and "--mcp-config" not in seen["cmd"]
 
 
+@pytest.mark.real_sidecalls
+def test_a_claude_side_call_carries_no_session_context(monkeypatch):
+    """A side call's prompt is its whole instruction: it replaces Claude Code's system prompt
+    with a one-liner and loads none of the person's memory files, where the CLI has the flag;
+    the catalog probes, which must see the session's own prompt, are unaffected."""
+    import subprocess
+    from tokeneconomizer.plugin import sidecall
+    helps = {"new": "  --no-session-persistence\n  --system-prompt <prompt>   System prompt",
+             "old": "  -p"}
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        if cmd[1:] == ["--help"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=helps[cmd[0]], stderr="")
+        seen.update(cmd=cmd, env=kw["env"])
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps({
+            "result": "OK", "usage": {"input_tokens": 10, "output_tokens": 1},
+            "modelUsage": {"claude-haiku-4-5": {}}}), stderr="")
+
+    monkeypatch.setattr(sidecall.subprocess, "run", fake_run)
+    monkeypatch.setattr(sidecall, "_HELP", {})
+    assert sidecall.claude_call("Reply with exactly: OK", cli="new")[0] == "OK"
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("--system-prompt") + 1] == sidecall.SIDE_SYSTEM_PROMPT
+    assert seen["env"]["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] == "1"
+    assert seen["env"]["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+    assert seen["env"]["TE_SIDECALL"] == "1"
+    assert "--system-prompt" not in sidecall.claude_flags("new")         # the probes' flags
+    # a Claude Code without the flag would reject it: the call goes out without
+    sidecall.claude_call("Reply with exactly: OK", cli="old")
+    assert "--system-prompt" not in seen["cmd"]
+
+
 def test_claude_cli_falls_back_to_the_native_install_when_not_on_path(monkeypatch, tmp_path):
     import os
     from tokeneconomizer.plugin import sidecall

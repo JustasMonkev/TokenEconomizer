@@ -7,7 +7,9 @@ so no extra API key is needed and the call is billed where the session is:
 
   * Claude Code: `claude -p --output-format json --tools "" --max-turns 1`, with none of the
     person's MCP servers (`--strict-mcp-config` and an empty `--mcp-config`, where the CLI has
-    them), on `paid_model` (default `haiku`). This is a deliberate departure from the
+    them), a one-line `--system-prompt` in place of Claude Code's own and no memory files
+    (`CLAUDE_CODE_DISABLE_CLAUDE_MDS`, see `SIDE_SYSTEM_PROMPT`), on `paid_model` (default
+    `haiku`). This is a deliberate departure from the
     experiments, which ran every optimizer call on the agent's own model so overhead could not
     look cheaper than the arm it was charged to; in a user's session the cheapest capable model
     is the right default, and the ledger records the real cost either way.
@@ -161,15 +163,36 @@ def claude_no_mcp(cli, cwd):
     return ["--strict-mcp-config", "--mcp-config", path]
 
 
+# A side call's prompt carries its whole instruction (the proposer's digest, the judge's trace),
+# so it needs none of an interactive session's context: not Claude Code's own system prompt,
+# which describes tools the call does not have, and not the person's memory files, which
+# Claude Code loads into every request. Both are re-sent, and written to the cache, on every
+# side call. Measured on Claude Code 2.1.316 (Haiku 5.5, a 4.5k-token ~/.claude/CLAUDE.md): a
+# one-line call wrote 7,871 tokens to the cache by default and read 383 fresh tokens with this.
+SIDE_SYSTEM_PROMPT = "You answer exactly what is asked, in the format asked for."
+# Unknown variables are ignored by a Claude Code that predates them, so these need no probe.
+CLAUDE_SIDE_ENV = {"CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1",
+                   "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}
+
+
+def claude_lean(cli):
+    """`--system-prompt` with a one-line prompt, when this Claude Code has it (see
+    `SIDE_SYSTEM_PROMPT`). Not for the catalog probes, which must see the session's own."""
+    if "--system-prompt" not in _claude_help(cli):
+        return []
+    return ["--system-prompt", SIDE_SYSTEM_PROMPT]
+
+
 def claude_call(prompt, model="haiku", cli=None, timeout=TIMEOUT_S):
     cli = cli or claude_cli()
     with tempfile.TemporaryDirectory(prefix="te-side-") as cwd:
         # `--mcp-config` takes several values, so an option follows it, never a bare argument.
         cmd = ([cli, "-p", "--output-format", "json", "--max-turns", "1", "--tools", ""]
-               + claude_no_mcp(cli, cwd) + ["--model", model or "haiku"] + claude_flags(cli))
+               + claude_no_mcp(cli, cwd) + ["--model", model or "haiku"] + claude_flags(cli)
+               + claude_lean(cli))
         out = subprocess.run(cmd, input=prompt, capture_output=True,
-                             encoding="utf-8", errors="replace", timeout=timeout, env=_env(),
-                             cwd=cwd)
+                             encoding="utf-8", errors="replace", timeout=timeout,
+                             env=dict(_env(), **CLAUDE_SIDE_ENV), cwd=cwd)
     try:
         data = json.loads(out.stdout or "{}")
     except ValueError:
