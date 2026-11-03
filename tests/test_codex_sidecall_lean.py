@@ -254,3 +254,20 @@ def test_skill_discovery_handles_symlinks_without_revisiting_cycles(monkeypatch,
     except OSError as error:
         pytest.skip(f"symlink unavailable: {error}")
     assert sidecall._codex_skill_paths({"CODEX_HOME": str(home)}) == [str(skill)]
+
+
+def test_a_failed_probe_is_remembered_for_an_hour_not_a_day(monkeypatch, tmp_path):
+    now = [1_000_000.0]
+    monkeypatch.setattr(sidecall.time, "time", lambda: now[0])
+    calls = _cli(monkeypatch, validation=1)          # the strict check fails once...
+    assert sidecall.codex_call("Reply OK")[0] == "OK"
+    calls2 = _cli(monkeypatch)                       # ...then the CLI is healthy
+    assert sidecall.codex_call("Reply OK")[0] == "OK"
+    assert all(cmd[1] == "exec" for cmd, _ in calls2)          # still remembered
+    now[0] += sidecall.LEAN_FAILURE_TTL_S + 1
+    calls2.clear()
+    assert sidecall.codex_call("Reply OK")[0] == "OK"
+    exec_cmd = next(cmd for cmd, _ in calls2 if cmd[1] == "exec")
+    assert "features.shell_tool=false" in _overrides(exec_cmd)
+    log = (tmp_path / "te-state" / "errors.log").read_text()
+    assert log.count("strict config check failed") == 1

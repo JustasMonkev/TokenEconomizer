@@ -264,13 +264,45 @@ def test_a_trial_mask_applied_in_part_shrinks_the_trial_to_what_was_applied(tmp_
     assert record["cost_guard"]["phase"] == "retained" and record["mask_after"] == kept
 
 
-def test_a_mask_with_a_package_outside_the_trial_is_restored(tmp_path):
+def test_a_mask_the_trial_did_not_choose_is_skipped(tmp_path):
     profile = cu.CodexUntoolProfile("a/b", str(tmp_path), fresh=True)
     warm(profile)
+    candidate = profile.state["cost_guard"]["candidate"]
     profile.begin_task("foreign")
     profile._pending["logical_capabilities"] = ["deferred_wait"]
     record = profile.observe(UNUSED, resolved=True, cost_row=cost())
     assert record["cost_guard"]["reason"] == "candidate-mask-changed"
+    assert record["cost_guard"]["phase"] == "trial"
+    assert record["cost_guard"]["trial"]["samples"] == 0
+    assert record["mask_after"] == candidate
+
+
+def test_using_a_package_that_was_given_back_does_not_end_the_trial(tmp_path):
+    profile = cu.CodexUntoolProfile("a/b", str(tmp_path), fresh=True)
+    warm(profile)
+    candidate = profile.state["cost_guard"]["candidate"]
+    given = candidate[0]
+    rest = [c for c in candidate if c != given]
+    profile.begin_task("given-back-and-used",
+                       available_capabilities=[c for c in cu.CANDIDATE_CAPABILITIES if c != given])
+    profile._pending["logical_capabilities"] = rest
+    used = {"attempted": {given: 1}, "completed": {given: 1}, "failed": {}}
+    record = profile.observe(used, resolved=True, cost_row=cost(fresh=500))
+    assert record["cost_guard"]["phase"] == "trial"
+    assert record["cost_guard"]["candidate"] == rest
+    assert record["mask_after"] == rest
+
+
+def test_a_trial_given_back_whole_starts_a_fresh_baseline(tmp_path):
+    profile = cu.CodexUntoolProfile("a/b", str(tmp_path), fresh=True)
+    warm(profile)
+    candidate = profile.state["cost_guard"]["candidate"]
+    profile.begin_task("all-given-back", available_capabilities=[
+        c for c in cu.CANDIDATE_CAPABILITIES if c not in candidate])
+    record = profile.observe(UNUSED, resolved=True, cost_row=cost())
+    assert record["cost_guard"]["phase"] == "baseline"
+    assert record["cost_guard"]["reason"] == "candidate-given-back"
+    assert record["cost_guard"]["baseline"]["samples"] == 0
     assert record["mask_after"] == []
 
 

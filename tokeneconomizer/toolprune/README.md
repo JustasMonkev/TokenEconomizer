@@ -27,9 +27,10 @@ How tool pruning (see the [main README](../../README.md)) decides what to drop, 
 The cost guard needs an explicit priced model and complete token buckets. Graded successes
 and completed-but-ungraded interactive sessions are separate comparison bases. A failed task
 or use of a trial capability restores tools. A session that cannot be compared (mixed-mask
-resume, mixed-model or incomplete usage, an unfinished turn, another price basis) is skipped,
-not counted; a trial unmeasured for `MAX_TRIAL_SKIPS` sessions is restored. A trial mask
-applied in part, as when a package is given back, shrinks the trial and restarts its samples. Old policy masks are restored before a new baseline is collected, but historical
+resume, mixed-model or incomplete usage, an unfinished turn, another price basis, a mask the
+trial did not choose) is skipped, not counted; a trial with `MAX_TRIAL_SKIPS` skips in all is
+restored. A trial mask applied in part, or a package given back, shrinks the trial and
+restarts its samples; a trial given back whole starts a fresh baseline. Old policy masks are restored before a new baseline is collected, but historical
 completed-use protections survive. Restoration only removes settings owned by TokenEconomizer
 and retries after temporary write failures. `untool.json` exposes the guard's phase and reason.
 

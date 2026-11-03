@@ -555,23 +555,39 @@ class CodexUntoolProfile:
                 guard["reason"] = "retained-mask-not-applied"
             return current
         expected = set(guard["candidate"]) if phase == "trial" else set()
-        if phase == "trial" and expected & protected:
-            return rollback("candidate-capability-used")
+
+        def shrink(kept, reason):
+            # The trial goes on with what is still applied, from no samples, since the earlier
+            # ones ran under a larger mask.
+            guard.update(candidate=sorted(kept), reason=reason,
+                         trial={"samples": 0, "effective_tokens": 0, "requests": 0,
+                                "observations": [], "skipped": 0})
+            return set(kept)
+
+        if phase == "trial":
+            # A package the host can no longer apply -- given back by the person -- leaves the
+            # trial. With none left, the guard starts over from a fresh baseline.
+            available = self._pending.get("available_capabilities")
+            available = set(expected if available is None else available)
+            given_back = expected - available - actual
+            if given_back:
+                expected = current = shrink(expected - given_back, "candidate-given-back")
+                if not expected:
+                    guard.update(phase="baseline", decision="hold",
+                                 baseline={"samples": 0, "effective_tokens": 0, "requests": 0,
+                                           "observations": []})
+                    return set()
         if phase == "trial" and actual and actual < expected:
             hinted = set(self._pending.get("task_hints") or ())
             if expected - actual <= hinted:
                 return skip("candidate-hinted")      # this task's text asked for a package
-            # Packages given back (or a mask applied in part): the trial goes on with what is
-            # applied, from no samples, since the earlier ones ran under a larger mask.
-            guard.update(candidate=sorted(actual), reason="candidate-shrunk",
-                         trial={"samples": 0, "effective_tokens": 0, "requests": 0,
-                                "observations": [], "skipped": 0})
-            current = set(actual)
-            expected = set(actual)
+            expected = current = shrink(actual, "candidate-shrunk")   # a mask applied in part
+        if phase == "trial" and expected & protected:
+            return rollback("candidate-capability-used")
         if actual != expected:
-            if actual:
-                return rollback("candidate-mask-changed")
-            guard["reason"] = "candidate-not-applied"
+            if actual:     # ran a mask the trial did not choose: not comparable
+                return skip("candidate-mask-changed")
+            guard["reason"] = "candidate-not-applied"    # proposed, not applied yet
             return current
         window = guard[phase]
         observations = window["observations"] + [{"effective_tokens": sample["effective_tokens"],

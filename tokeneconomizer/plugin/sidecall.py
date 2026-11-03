@@ -240,6 +240,11 @@ def _codex_skill_paths(env):
 # A server whose name is not (a dot in it, say) stays enabled; the rest are still switched off.
 _MCP_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
 LEAN_CACHE_TTL_S = 24 * 3600
+# A probe that failed (a non-zero exit) may be passing trouble -- a locked config, a killed
+# process -- so its answer is kept for an hour, not a day.
+LEAN_FAILURE_TTL_S = 3600
+# Answers that say the CLI itself cannot take the overrides, kept the full day.
+_LEAN_UNSUPPORTED = ("app-server has no --strict-config", "features list in an unknown format")
 
 
 def _stat(path):
@@ -273,9 +278,11 @@ def _read_lean_cache(env, key):
             doc = json.load(fh)
     except (OSError, ValueError):
         return None
-    if (not isinstance(doc, dict) or doc.get("key") != key
-            or not isinstance(doc.get("at"), (int, float))
-            or time.time() - doc["at"] > LEAN_CACHE_TTL_S):
+    if not isinstance(doc, dict) or doc.get("key") != key:
+        return None
+    ttl = (LEAN_CACHE_TTL_S if doc.get("settings") or doc.get("reason") in _LEAN_UNSUPPORTED
+           else LEAN_FAILURE_TTL_S)
+    if not isinstance(doc.get("at"), (int, float)) or time.time() - doc["at"] > ttl:
         return None
     settings = doc.get("settings")
     if not isinstance(settings, list) or not all(isinstance(x, str) for x in settings):
@@ -288,13 +295,18 @@ def _write_lean_cache(env, key, settings, reason):
     errors.log, so a lean side call that quietly fell back can be seen in `te doctor`."""
     path = _lean_cache_path(env)
     try:
+        with open(path, encoding="utf-8") as fh:
+            before = json.load(fh).get("reason")
+    except (OSError, ValueError, AttributeError):
+        before = None
+    try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp"
+        tmp = f"{path}.{os.getpid()}.tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump({"key": key, "at": time.time(), "settings": settings,
                        "reason": reason}, fh)
         os.replace(tmp, path)
-        if not settings:
+        if not settings and reason != before:      # noted once per reason, not per probe
             from .paths import state_root
             with open(os.path.join(state_root(env), "errors.log"), "a",
                       encoding="utf-8") as fh:

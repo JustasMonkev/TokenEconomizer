@@ -22,10 +22,11 @@ request-count availability consistent. Unknown costs cannot authorize pruning.
 Interactive completion is not a success grade. Completed-ungraded sessions are compared only
 with that same basis. Record the launch mask and do not count mixed-mask resumes,
 mixed-model cumulative usage, malformed counters, unfinished sessions, or a session priced on
-another basis: such a session is skipped, and only a measured signal ends a trial. A trial
-left unmeasured for nine sessions is restored. Count a trial only when its mask was actually
-applied; a mask applied in part (a package given back) shrinks the trial to what is applied
-and restarts its samples. A failed baseline session is not counted but keeps earlier samples. Task hints and completed-use protections remain effective; known
+another basis, or a mask the trial did not choose: such a session is skipped, and only a
+measured signal ends a trial. A trial with nine skipped sessions in all is restored. Count a
+trial only when its mask was actually applied; a mask applied in part, or a package given
+back, shrinks the trial to what remains and restarts its samples, and a trial given back
+whole starts a fresh baseline. A failed baseline session is not counted but keeps earlier samples. Task hints and completed-use protections remain effective; known
 failures restore trial/retained tools. Old policy state loses masks and cost evidence but
 retains validated historical use protections. Restore only TE-owned settings, retrying
 temporary failures.
@@ -33,7 +34,8 @@ temporary failures.
 Separately, reduce Codex optimizer context using validated per-call overrides, not
 `--ignore-user-config`: ignoring user config can discard provider/authentication routing.
 Offline compatibility checks precede one inference call and use at most a quarter of its
-deadline; their answer is remembered per CLI binary, Codex config and skill set. Unsupported
+deadline; their answer is remembered per CLI binary, Codex config and skill set (a day, or
+an hour after a failed probe). Unsupported
 configurations keep the old path rather than failing or retrying paid inference.
 
 ## Alternatives
