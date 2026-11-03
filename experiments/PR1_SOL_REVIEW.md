@@ -1,5 +1,7 @@
 # TokenEconomizer PR 1 review and GPT 6.1 SOL benchmark
 
+The JSON summaries named below (`experiments/reports/pr1-sol/*.json`) are run outputs, so they stay out of git (`CLAUDE.md`); they were recorded in commit `b410c9d`.
+
 Implementation status: [the follow-up](PR1_SOL_FOLLOWUP.md) implements all three recommendations
 locally, fixes the compact-policy finding, and records new SOL measurements. Results below
 are the original review's measurements and are retained unchanged.
@@ -46,7 +48,7 @@ The first order reduced raw tokens by 26.8% but increased effective cost by 46.1
 
 Each order used a fresh, cold-start `CodexUntoolProfile`, learned only from completed tasks, and randomized the baseline/TE execution order within each pair. Existing authentication was reused through a temporary isolated Codex directory. The benchmark applied supported native config toggles. It did **not** enable micro-skills, the loop guard, relay rewriting, or version-specific base-prompt pruning unavailable for CLI 0.166.0. Unsupported selections are recorded per run. This is a small synthetic component smoke benchmark, not SWE-bench or a validation of the complete three-mechanism system.
 
-Evidence: [combined totals](reports/pr1-sol/coding-combined.json), [first order](reports/pr1-sol/coding-order1.json), [second order](reports/pr1-sol/coding-order2.json). Each task directory contains its transcript, source workspace, usage row, prompt, command, and grading result.
+Evidence: combined totals (`coding-combined.json`), first order (`coding-order1.json`), second order (`coding-order2.json`). Each task directory contains its transcript, source workspace, usage row, prompt, command, and grading result.
 
 ## Compact judge results
 
@@ -67,7 +69,7 @@ The prototype replaces the Codex base instructions with a short classifier instr
 
 Cache-hit rates differed: 13.3% full, 39.2% compact, and 12.7% lean. Host context also varied by roughly 3,169 input tokens in several runs. Therefore the 39.0% weighted reduction is an observed total, not a clean estimate of the compact format's causal cost saving. The exploratory paired-bootstrap interval for compact total-token savings spans approximately **−2.3% to +10.8%**. The much larger output reduction is the clearest component result.
 
-Evidence: the locally retained manifest and randomized schedule, [totals](reports/pr1-sol/judge-summary.json), [analysis and limitations](reports/pr1-sol/judge-analysis.json), [structured review](reports/pr1-sol/review.json). Per-call directories retain exact prompts, raw responses, usage, commands, and verdicts.
+Evidence: the locally retained manifest and randomized schedule, totals (`judge-summary.json`), analysis and limitations (`judge-analysis.json`), structured review (`review.json`). Per-call directories retain exact prompts, raw responses, usage, commands, and verdicts.
 
 ## Accounting
 

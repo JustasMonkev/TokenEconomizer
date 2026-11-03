@@ -43,6 +43,7 @@ host's side calls (`paused`): every later call would fail the same way, and Copi
 empty session behind each time. Nothing here runs unless micro-skills is on (the proposer)
 or the loop guard is (the judge and the nudge writer).
 """
+import hashlib
 import json
 import os
 import re
@@ -235,61 +236,155 @@ def _codex_skill_paths(env):
     return sorted(paths)
 
 
-def codex_lean_args(cli, cwd, env, timeout=30):
-    """Validate per-call context overrides without inference or changing user configuration."""
-    deadline = time.monotonic() + timeout
+# An MCP server name usable as a bare key in a `-c mcp_servers.<name>.enabled=false` override.
+# A server whose name is not (a dot in it, say) stays enabled; the rest are still switched off.
+_MCP_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
+LEAN_CACHE_TTL_S = 24 * 3600
 
+
+def _stat(path):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return [st.st_mtime_ns, st.st_size]
+
+
+def _lean_cache_key(cli, env, skills):
+    """What the validated overrides depend on: the CLI binary, the user's Codex config and the
+    skills found. A change to any of them probes again; so does a day passing."""
+    exe = shutil.which(cli, path=env.get("PATH")) or cli
+    exe = os.path.realpath(exe)
+    home = codex_home(env)
+    return hashlib.sha256(json.dumps({
+        "cli": exe, "cli_stat": _stat(exe), "home": home,
+        "config": _stat(os.path.join(home, "config.toml")), "skills": skills,
+    }, sort_keys=True).encode()).hexdigest()
+
+
+def _lean_cache_path(env):
+    from .paths import state_root
+    return os.path.join(state_root(env), "hosts", "codex", "lean-sidecall.json")
+
+
+def _read_lean_cache(env, key):
+    try:
+        with open(_lean_cache_path(env), encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if (not isinstance(doc, dict) or doc.get("key") != key
+            or not isinstance(doc.get("at"), (int, float))
+            or time.time() - doc["at"] > LEAN_CACHE_TTL_S):
+        return None
+    settings = doc.get("settings")
+    if not isinstance(settings, list) or not all(isinstance(x, str) for x in settings):
+        return None
+    return settings
+
+
+def _write_lean_cache(env, key, settings, reason):
+    """Remember the probes' answer. A CLI that cannot take the overrides is noted once in
+    errors.log, so a lean side call that quietly fell back can be seen in `te doctor`."""
+    path = _lean_cache_path(env)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"key": key, "at": time.time(), "settings": settings,
+                       "reason": reason}, fh)
+        os.replace(tmp, path)
+        if not settings:
+            from .paths import state_root
+            with open(os.path.join(state_root(env), "errors.log"), "a",
+                      encoding="utf-8") as fh:
+                fh.write(f"--- {time.strftime('%Y-%m-%dT%H:%M:%S')} sidecall codex: lean "
+                         f"overrides unavailable ({reason}); using the full invocation\n")
+    except OSError:
+        pass
+
+
+def _probe_lean_settings(cli, cwd, env, path, skills, deadline):
+    """(settings, reason): the overrides the installed CLI validated offline, without the
+    per-call instructions file, or ([], why not). Raises on a timeout or a missing CLI, which
+    say nothing lasting about the CLI and so are not remembered."""
     def probe(args):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise subprocess.TimeoutExpired([cli] + args, timeout)
+            raise subprocess.TimeoutExpired([cli] + args, 0)
         return subprocess.run([cli] + args, capture_output=True, encoding="utf-8",
                               errors="replace", stdin=subprocess.DEVNULL, cwd=cwd,
                               env=env, timeout=remaining)
 
+    help_result = probe(["app-server", "--help"])
+    help_text = help_result.stdout or ""
+    if help_result.returncode or not all(flag in help_text for flag in (
+            "--strict-config", "--print-startup-config")):
+        return [], "app-server has no --strict-config"
+    features = probe(["features", "list"])
+    if features.returncode:
+        return [], "features list failed"
+    names = {line.split()[0] for line in (features.stdout or "").splitlines()
+             if line.split() and line.split()[-1] in ("true", "false")}
+    if not {"shell_tool", "plugins", "apps"}.issubset(names):
+        return [], "features list in an unknown format"
+    settings = ["project_doc_max_bytes=0", 'developer_instructions=""',
+                'web_search="disabled"', "agents.enabled=false"]
+    settings += [f"features.{name}=false" for name in _CODEX_SIDE_FEATURES if name in names]
+    if "skip_host_skill_discovery" in names:
+        settings.append("features.skip_host_skill_discovery=true")
+    if skills:
+        settings.append("skills.config=[" + ",".join(
+            "{path=" + json.dumps(skill) + ",enabled=false}" for skill in skills) + "]")
+    instructions = ["model_instructions_file=" + json.dumps(path)]
+
+    def args(items):
+        return [arg for setting in instructions + items for arg in ("-c", setting)]
+
+    servers_result = probe(["mcp", "list", "--json"] + args(settings))
+    if servers_result.returncode:
+        return [], "mcp list failed"
     try:
-        help_result = probe(["app-server", "--help"])
-        help_text = help_result.stdout or ""
-        if help_result.returncode or not all(flag in help_text for flag in (
-                "--strict-config", "--print-startup-config")):
-            return []
-        features = probe(["features", "list"])
-        if features.returncode:
-            return []
-        names = {line.split()[0] for line in (features.stdout or "").splitlines()
-                 if line.split() and line.split()[-1] in ("true", "false")}
-        if not {"shell_tool", "plugins", "apps"}.issubset(names):
-            return []
-        path = os.path.join(cwd, "instructions.txt")
+        servers = json.loads(servers_result.stdout)
+    except ValueError:
+        return [], "mcp list is not JSON"
+    if not isinstance(servers, list):
+        return [], "mcp list is not a list"
+    settings += [f"mcp_servers.{name}.enabled=false"
+                 for name in sorted({item["name"] for item in servers
+                                     if isinstance(item, dict)
+                                     and isinstance(item.get("name"), str)
+                                     and _MCP_KEY_RE.fullmatch(item["name"])})]
+    valid = probe(["app-server", "--strict-config", "--print-startup-config"] + args(settings))
+    if valid.returncode:
+        return [], "strict config check failed"
+    return settings, "validated"
+
+
+def codex_lean_args(cli, cwd, env, timeout=30):
+    """Validate per-call context overrides without inference or changing user configuration.
+
+    The probes (four short CLI runs) are remembered per CLI binary, Codex config and skill set
+    (`_lean_cache_key`), so only the first side call after a change pays for them. A probe
+    that timed out falls back for this call only and is not remembered."""
+    deadline = time.monotonic() + timeout
+    path = os.path.join(cwd, "instructions.txt")
+    try:
+        # Written first: Codex reads the file while loading the config, probes included.
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(CODEX_SIDE_PROMPT)
-        settings = ["model_instructions_file=" + json.dumps(path),
-                    "project_doc_max_bytes=0", 'developer_instructions=""',
-                    'web_search="disabled"', "agents.enabled=false"]
-        settings += [f"features.{name}=false" for name in _CODEX_SIDE_FEATURES if name in names]
-        if "skip_host_skill_discovery" in names:
-            settings.append("features.skip_host_skill_discovery=true")
         skills = _codex_skill_paths(env)
-        if skills:
-            settings.append("skills.config=[" + ",".join(
-                "{path=" + json.dumps(skill) + ",enabled=false}" for skill in skills) + "]")
-        args = [arg for setting in settings for arg in ("-c", setting)]
-        servers_result = probe(["mcp", "list", "--json"] + args)
-        if servers_result.returncode:
+        key = _lean_cache_key(cli, env, skills)
+        settings = _read_lean_cache(env, key)
+        if settings is None:
+            settings, reason = _probe_lean_settings(cli, cwd, env, path, skills, deadline)
+            _write_lean_cache(env, key, settings, reason)
+        if not settings:
             return []
-        servers = json.loads(servers_result.stdout)
-        if not isinstance(servers, list) or any(
-                not isinstance(item, dict) or not isinstance(item.get("name"), str)
-                or not re.fullmatch(r"[A-Za-z0-9_-]+", item["name"])
-                for item in servers):
-            return []
-        settings += [f"mcp_servers.{name}.enabled=false"
-                     for name in sorted({item["name"] for item in servers})]
-        args = [arg for setting in settings for arg in ("-c", setting)]
-        valid = probe(["app-server", "--strict-config", "--print-startup-config"] + args)
-        return args if valid.returncode == 0 else []
-    except (OSError, subprocess.SubprocessError, ValueError):
+    except (OSError, subprocess.SubprocessError):
         return []
+    return [arg for setting in ["model_instructions_file=" + json.dumps(path)] + settings
+            for arg in ("-c", setting)]
 
 
 def codex_call(prompt, model="", cli="codex", timeout=TIMEOUT_S):
@@ -300,13 +395,16 @@ def codex_call(prompt, model="", cli="codex", timeout=TIMEOUT_S):
         cmd += ["-m", model]
     with tempfile.TemporaryDirectory(prefix="te-side-") as cwd:
         env = _env()
-        cmd += codex_lean_args(cli, cwd, env, timeout=min(timeout, 30))
+        # The probes get at most a quarter of the budget, so the model call always keeps the
+        # rest: a slow probe falls back to the full invocation instead of starving the call.
+        cmd += codex_lean_args(cli, cwd, env, timeout=min(timeout / 4, 30))
         cmd.append(prompt)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise subprocess.TimeoutExpired(cmd, timeout)
+        # stdin closed: `codex exec` reads a piped stdin as more prompt and waits for its end.
         out = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace",
-                             timeout=remaining, env=env, cwd=cwd)
+                             stdin=subprocess.DEVNULL, timeout=remaining, env=env, cwd=cwd)
     text, usage = "", None
     for line in (out.stdout or "").splitlines():
         try:

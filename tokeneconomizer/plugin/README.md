@@ -32,6 +32,9 @@ When the installed CLI validates the configuration offline, per-call overrides r
 base instructions with a short text-helper prompt and suppress project documents, discovered
 skills, supported tool features, plugins/apps, and MCP servers. Temporary instructions are
 removed after the call; user settings and interactive sessions are not edited. Compatibility
-probes and inference share the caller's timeout, and a failed paid call is never retried.
+probes use at most a quarter of the caller's timeout and their answer is remembered per CLI
+binary, Codex config and skill set (`hosts/codex/lean-sidecall.json` under the state root); a
+CLI that cannot take the overrides is noted once in errors.log. A failed paid call is never
+retried. An MCP server whose name is not a bare TOML key stays on.
 Unsupported CLI/configuration combinations use the previous invocation. Native tool schemas
 without a supported toggle may remain; this is lean context, not a universal no-tools API.

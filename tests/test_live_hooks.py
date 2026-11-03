@@ -1439,9 +1439,10 @@ def test_codex_cost_evidence_uses_the_launch_mask_not_current_settings(env, repo
     call(env, dict(base, hook_event_name="SessionEnd", reason="other"), "codex")
     guard = st.read("untool.json")["cost_guard"]
     assert guard["trial"]["samples"] == 0
-    if resume:
-        assert guard["phase"] == "rejected"
-        assert denylist.applied_for(st, repo, "codex") == []
+    if resume:     # a resumed session is not compared, and the trial goes on
+        assert guard["phase"] == "trial"
+        assert guard["reason"] == "incomplete-cost-usage"
+        assert denylist.applied_for(st, repo, "codex") == ["collaboration", "goals"]
     else:
         assert guard["reason"] == "candidate-not-applied"
 

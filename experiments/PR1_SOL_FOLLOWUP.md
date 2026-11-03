@@ -1,5 +1,7 @@
 # TokenEconomizer PR 1 implementation follow up
 
+The JSON summaries named below (`experiments/reports/pr1-sol/*.json`) are run outputs, so they stay out of git (`CLAUDE.md`); they were recorded in commit `b410c9d`.
+
 All three recommendations from [the review](PR1_SOL_REVIEW.md) are implemented locally:
 cache-aware Codex pruning, lean Codex optimizer calls, and preservation of compact-judge
 custom policies. Three implementation agents worked on separate modules; integration review
@@ -74,7 +76,7 @@ do not establish unchanged end-to-end coding quality. Authentication/provider pr
 and unsupported-version behavior have separate regression tests.
 
 Evidence: the locally retained side-call manifest,
-[summary](reports/pr1-sol/followup-sidecalls.json). Each call directory retains its exact
+summary (`followup-sidecalls.json`). Each call directory retains its exact
 prompt, command, raw CLI response, usage, and parsed verdict. Startup configuration probe
 output is not saved, avoiding disclosure of provider configuration.
 
@@ -107,8 +109,8 @@ not model requests. It measured native pruning only, without micro-skills, the l
 relay rewriting, or unsupported base-prompt removal. This validates detection and rollback
 in a small stream, not statistical superiority over the old controller or a SWE-bench result.
 
-Evidence: [coding summary](reports/pr1-sol/followup-coding.json),
-[combined follow-up data](reports/pr1-sol/followup-summary.json). Each guarded row preserves the
+Evidence: coding summary (`followup-coding.json`),
+combined follow-up data (`followup-summary.json`). Each guarded row preserves the
 baseline/trial windows, decision, actual command, code workspace, transcript, and grading.
 
 Dollar estimates use the [published SOL rates](https://developers.openai.com/api/docs/models/gpt-6.1-sol).

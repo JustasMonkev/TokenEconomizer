@@ -263,7 +263,9 @@ def codex_session_usage(rollout_path):
         if p.get("type") != "token_count":
             continue
         info = p.get("info") or {}
-        if info.get("total_token_usage"):
+        # Codex sometimes writes a token_count that repeats the previous cumulative total (about
+        # 1 in 20 in real rollouts); only a changed total is another request.
+        if info.get("total_token_usage") and info["total_token_usage"] != total:
             total = info["total_token_usage"]
             requests += 1
     meta = codex_session_meta(rollout_path)

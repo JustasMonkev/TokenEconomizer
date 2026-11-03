@@ -7,7 +7,8 @@ every request. This controller removes the packages a repository's sessions do n
   * A fresh repository starts on the COMPLETE contract (its first session sees everything).
   * Three complete, priced baseline sessions precede one stable trial mask. The mask is
     retained only when three trial sessions show lower cache-weighted cost on the same
-    model and quality basis. This observational guard is not a matched causal estimate.
+    model and quality basis. A session that cannot be compared is skipped, not counted.
+    This observational guard is not a matched causal estimate.
     A single completed use PERMANENTLY protects a package.
   * Higher-risk packages (image/media, skills) need more loaded-but-unused exposures before
     demotion than collaboration or web.
@@ -305,6 +306,8 @@ PROBE_PRIORITY = (
 
 PROFILE_VERSION = "codex-cache-cost-stable-trial-v1"
 COST_WINDOW = 3
+# Trial sessions that could not be compared (see _cost_decision) before the trial is restored.
+MAX_TRIAL_SKIPS = 3 * COST_WINDOW
 RETAINED_CAPABILITIES = ("apply_patch", "exec_command", "planning", "write_stdin")
 
 
@@ -320,6 +323,7 @@ def _contract_fingerprint():
     return hashlib.sha256(json.dumps({
         "profile": PROFILE_VERSION,
         "cost_window": COST_WINDOW,
+        "max_trial_skips": MAX_TRIAL_SKIPS,
         "evidence_candidates": _EVIDENCE_CANDIDATES,
         "candidates": CANDIDATE_CAPABILITIES,
         "core_capabilities": CORE_CAPABILITIES,
@@ -498,6 +502,14 @@ class CodexUntoolProfile:
                           "per_request": requests is not None}}, None
 
     def _cost_decision(self, row, resolved, current, protected):
+        """The cost guard's step for one finished session; returns the mask for the next.
+
+        Only a measured signal ends a trial for good: a known failure, a trial package used,
+        or three comparable trial sessions that cost no less than the baseline. A session that
+        cannot be compared -- usage incomplete (a resumed session, a mixed launch mask, a model
+        switched mid-session), a turn left unfinished, another model or price -- is skipped and
+        does not count. A trial that stays unmeasured for `MAX_TRIAL_SKIPS` sessions is
+        restored rather than kept on without evidence."""
         guard = self.state["cost_guard"]
         phase = guard["phase"]
         guard["decision"] = "hold"
@@ -505,6 +517,15 @@ class CodexUntoolProfile:
         def rollback(reason):
             guard.update(phase="rejected", decision="rollback", reason=reason)
             return set()
+
+        def skip(reason):
+            guard["reason"] = reason
+            if phase == "trial":
+                window = guard["trial"]
+                window["skipped"] = int(window.get("skipped", 0) or 0) + 1
+                if window["skipped"] >= MAX_TRIAL_SKIPS:
+                    return rollback("trial-unmeasured")
+            return current
 
         if phase == "rejected":
             guard["decision"] = "rollback"
@@ -516,17 +537,14 @@ class CodexUntoolProfile:
         if resolved is False:
             if phase in ("trial", "retained"):
                 return rollback("task-failed")
-            guard["reason"] = "task-failed"
-            guard["baseline"] = {"samples": 0, "effective_tokens": 0, "requests": 0,
-                                 "observations": []}
+            guard["reason"] = "task-failed"       # not counted; earlier baseline samples stay
             return set()
         sample, error = self._cost_sample(row, resolved)
         if error:
-            guard["reason"] = error
-            return rollback(error) if phase == "trial" else current
+            return skip(error)
         if guard["basis"] is not None and sample["basis"] != guard["basis"]:
             if phase in ("trial", "retained"):
-                return rollback("cost-basis-changed")
+                return skip("cost-basis-changed")
             guard["baseline"] = {"samples": 0, "effective_tokens": 0, "requests": 0,
                                  "observations": []}
         guard["basis"] = sample["basis"]
@@ -539,6 +557,17 @@ class CodexUntoolProfile:
         expected = set(guard["candidate"]) if phase == "trial" else set()
         if phase == "trial" and expected & protected:
             return rollback("candidate-capability-used")
+        if phase == "trial" and actual and actual < expected:
+            hinted = set(self._pending.get("task_hints") or ())
+            if expected - actual <= hinted:
+                return skip("candidate-hinted")      # this task's text asked for a package
+            # Packages given back (or a mask applied in part): the trial goes on with what is
+            # applied, from no samples, since the earlier ones ran under a larger mask.
+            guard.update(candidate=sorted(actual), reason="candidate-shrunk",
+                         trial={"samples": 0, "effective_tokens": 0, "requests": 0,
+                                "observations": [], "skipped": 0})
+            current = set(actual)
+            expected = set(actual)
         if actual != expected:
             if actual:
                 return rollback("candidate-mask-changed")

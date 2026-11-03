@@ -66,6 +66,8 @@ TOOL_JUDGE_FULL_ANSWER = (
 )
 TOOL_JUDGE_DOMAIN = TOOL_JUDGE_POLICY + TOOL_JUDGE_FULL_ANSWER
 
+# The same decision, asked for as a bare DROP list. The per-tool `reason` the full form asks
+# for is never read, yet it is most of the answer, and an answer is billed at the output rate.
 TOOL_JUDGE_COMPACT_ANSWER = (
     "Return ONLY a JSON object {\"drop\": [\"<tool_name>\", ...]} naming the tools to DROP. "
     "Every tool you do not name stays loaded. No reasons, no other keys.\n"
@@ -73,6 +75,9 @@ TOOL_JUDGE_COMPACT_ANSWER = (
 
 
 def _compact_brief(domain):
+    """The judge's brief with the DROP-list answer. A custom domain is kept whole, since its
+    policy and its answer format cannot be told apart reliably; the closing line says the new
+    format replaces any earlier one."""
     policy = TOOL_JUDGE_POLICY if domain == TOOL_JUDGE_DOMAIN else domain
     return (policy.rstrip() + "\nThe following output schema overrides only earlier "
             "response-format instructions; all tool-selection policies above still apply.\n"

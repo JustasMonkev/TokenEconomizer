@@ -46,3 +46,18 @@ def test_mixed_or_incomplete_costs_cannot_authorize_pruning(tmp_path, usage, mod
     assert measured["session_completed"] is True
     assert measured["usage_incomplete"] is True
     assert measured["input_tokens"] is None
+
+
+def test_a_token_count_that_repeats_the_previous_total_is_not_another_request(tmp_path):
+    def count(total):
+        return {"type": "event_msg", "payload": {"type": "token_count", "info": {
+            "total_token_usage": {"input_tokens": total, "cached_input_tokens": 0,
+                                  "output_tokens": 10}}}}
+    rows = [{"type": "turn_context", "payload": {"model": "gpt-6.1-sol"}},
+            count(100), count(100), count(250), count(250), count(250),
+            {"type": "event_msg", "payload": {"type": "task_complete"}}]
+    path = tmp_path / "rollout.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in rows))
+    usage = codex_session_usage(str(path))
+    assert usage["requests"] == 2
+    assert usage["input_tokens"] == 250

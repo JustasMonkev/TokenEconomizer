@@ -96,12 +96,55 @@ def test_request_normalized_regression_prevents_retention(tmp_path):
     (cost(session_completed=True), None),
     (cost(requests=1), True),
 ])
-def test_model_and_quality_basis_changes_do_not_mix_samples(tmp_path, row, resolved):
+def test_model_and_quality_basis_changes_are_skipped_not_mixed(tmp_path, row, resolved):
     profile = cu.CodexUntoolProfile("a/b", str(tmp_path), fresh=True)
     warm(profile)
+    candidate = profile.state["cost_guard"]["candidate"]
     _, record = finish(profile, "changed-basis", row, resolved=resolved)
-    assert record["mask_after"] == []
+    assert record["mask_after"] == candidate
+    assert record["cost_guard"]["phase"] == "trial"
     assert record["cost_guard"]["reason"] == "cost-basis-changed"
+    assert record["cost_guard"]["trial"]["samples"] == 0
+
+
+@pytest.mark.parametrize("bad,resolved", [
+    (cost(usage_incomplete=True), True),          # a resumed or mixed-mask session
+    (cost(session_completed=False), None),        # a turn left unfinished
+    ({k: v for k, v in cost().items() if k != "model"}, True),
+])
+def test_one_unclean_trial_session_is_skipped_and_the_trial_goes_on(tmp_path, bad, resolved):
+    profile = cu.CodexUntoolProfile("a/b", str(tmp_path), fresh=True)
+    warm(profile)
+    candidate = profile.state["cost_guard"]["candidate"]
+    _, record = finish(profile, "unclean", bad, resolved=resolved)
+    assert record["cost_guard"]["phase"] == "trial"
+    assert record["mask_after"] == candidate
+    for i in range(3):
+        _, record = finish(profile, f"trial-{i}", cost(fresh=500))
+    assert record["cost_guard"]["phase"] == "retained"
+    assert record["mask_after"] == candidate
+
+
+def test_a_trial_that_stays_unmeasured_is_restored(tmp_path):
+    profile = cu.CodexUntoolProfile("a/b", str(tmp_path), fresh=True)
+    warm(profile)
+    for i in range(cu.MAX_TRIAL_SKIPS - 1):
+        _, record = finish(profile, f"unclean-{i}", cost(usage_incomplete=True))
+        assert record["cost_guard"]["phase"] == "trial"
+    _, record = finish(profile, "last", cost(usage_incomplete=True))
+    assert record["cost_guard"]["reason"] == "trial-unmeasured"
+    assert record["mask_after"] == []
+
+
+def test_a_failed_baseline_session_keeps_the_earlier_samples(tmp_path):
+    profile = cu.CodexUntoolProfile("a/b", str(tmp_path), fresh=True)
+    for i in range(2):
+        finish(profile, f"baseline-{i}", cost())
+    _, record = finish(profile, "failed", cost(), resolved=False)
+    assert record["cost_guard"]["reason"] == "task-failed"
+    assert record["cost_guard"]["baseline"]["samples"] == 2
+    _, record = finish(profile, "baseline-2", cost())
+    assert record["cost_guard"]["phase"] == "trial"
 
 
 def test_genuinely_completed_ungraded_sessions_have_a_distinct_basis(tmp_path):
@@ -203,15 +246,31 @@ def test_scheduled_probes_wait_until_the_stable_trial_finishes(tmp_path):
     assert profile.begin_task("retained-probe")["probe_capability"] is not None
 
 
-def test_partial_trial_masks_are_restored_instead_of_running_without_measurement(tmp_path):
+def test_a_trial_mask_applied_in_part_shrinks_the_trial_to_what_was_applied(tmp_path):
     profile = cu.CodexUntoolProfile("a/b", str(tmp_path), fresh=True)
     warm(profile)
-    selection = profile.begin_task("partial-trial")
+    finish(profile, "trial-0", cost(fresh=500))
+    selection = profile.begin_task("given-back")
     assert len(selection["logical_capabilities"]) > 1
-    profile._pending["logical_capabilities"] = [selection["logical_capabilities"][0]]
+    kept = [selection["logical_capabilities"][0]]
+    profile._pending["logical_capabilities"] = kept
+    record = profile.observe(UNUSED, resolved=True, cost_row=cost(fresh=500))
+    assert record["cost_guard"]["phase"] == "trial"
+    assert record["cost_guard"]["candidate"] == kept
+    assert record["cost_guard"]["trial"]["samples"] == 1    # earlier samples ran a larger mask
+    assert record["mask_after"] == kept
+    for i in range(2):
+        _, record = finish(profile, f"trial-{i}", cost(fresh=500))
+    assert record["cost_guard"]["phase"] == "retained" and record["mask_after"] == kept
+
+
+def test_a_mask_with_a_package_outside_the_trial_is_restored(tmp_path):
+    profile = cu.CodexUntoolProfile("a/b", str(tmp_path), fresh=True)
+    warm(profile)
+    profile.begin_task("foreign")
+    profile._pending["logical_capabilities"] = ["deferred_wait"]
     record = profile.observe(UNUSED, resolved=True, cost_row=cost())
-    assert record["cost_guard"]["decision"] == "rollback"
-    assert record["cost_guard"]["trial"]["samples"] == 0
+    assert record["cost_guard"]["reason"] == "candidate-mask-changed"
     assert record["mask_after"] == []
 
 
@@ -240,3 +299,16 @@ def test_policy_migration_never_imports_another_repositories_protections(tmp_pat
     restored = cu.CodexUntoolProfile("a/b", str(tmp_path))
     assert restored.state["ever_completed"] == []
     assert restored.state["current_pruned"] == []
+
+
+def test_a_task_that_asks_for_a_trial_package_is_skipped_not_shrunk(tmp_path):
+    profile = cu.CodexUntoolProfile("a/b", str(tmp_path), fresh=True)
+    warm(profile)
+    candidate = profile.state["cost_guard"]["candidate"]
+    assert "image_media" in candidate
+    selection, record = finish(profile, "hinted", cost(fresh=500),
+                               problem_statement="Fix the screenshot in the attached image.png")
+    assert "image_media" not in selection["logical_capabilities"]
+    assert record["cost_guard"]["reason"] == "candidate-hinted"
+    assert record["cost_guard"]["candidate"] == candidate
+    assert record["mask_after"] == candidate

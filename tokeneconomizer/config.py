@@ -57,7 +57,9 @@ class ToolingConfig:
       * evidence          -- drop a tool loaded-but-unused for >= this many tasks (>0 on).
       * evidence_reaudit  -- periodically reload the full catalog every this many tasks.
       * judge             -- add a per-task instruction-aware LLM tool judge.
-      * judge_compact     -- request a DROP list instead of a reason per tool.
+      * judge_compact     -- ask that judge for a bare DROP list instead of a reason per
+                             tool (the same decision; see toolprune.tools). Last, so a
+                             positional ToolingConfig(...) from before it keeps its meaning.
 
     Codex capability pruning:
       * codex_untool      -- enable the evidence-gated, resolve-safe capability controller.
