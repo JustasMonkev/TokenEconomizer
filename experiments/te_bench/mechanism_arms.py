@@ -14,7 +14,7 @@ from ._armspec import arm, cfg
 from tokeneconomizer.config import InjectionConfig, ToolingConfig, SpiralConfig
 
 __all__ = ["MECHANISM_ARMS", "INJECT", "ENVFACTS", "ENVFACTS_PLUS", "UNTOOL", "SPIRAL",
-           "SPIRAL_WEB", "CODEX_UNTOOL", "CODEX_SPIRAL", "CODEX_SPIRAL_POSTGREEN"]
+           "SPIRAL_WEB", "UNTOOL_LEAN", "CODEX_UNTOOL", "CODEX_SPIRAL", "CODEX_SPIRAL_POSTGREEN"]
 
 # The proven single-mechanism flag sets, split out of `trimech` so each mechanism can be
 # measured on its own. They are the SAME parameters trimech co-activates -- an arm that
@@ -62,13 +62,16 @@ CODEX_SPIRAL = dict(codex_spiral=True, codex_spiral_profile="defensive")
 # every pre-2026-09-12 `codex_spiral_profile` in a stored run_config resolves to.
 CODEX_SPIRAL_POSTGREEN = dict(codex_spiral=True)     # SpiralConfig's own default profile
 UNTOOL = dict(evidence=3, judge=True)              # evidence untooling + tool judge
+# The same judge asked for a bare DROP list: the decision `UNTOOL` makes, at a fraction of its
+# output (the per-tool reasons are never read). `trimech-lean` is trimech with this alone.
+UNTOOL_LEAN = dict(UNTOOL, judge_compact=True)
 SPIRAL = dict(guard=True, judge=True, nudge=True)  # spiral guard -> judge -> nudge
 # Web-Bench's streams are 20-21 tasks, too short for the within-stream p90 envelope to warm
 # up, so its spiral arms pre-register one and write the nudge with the LLM.
 SPIRAL_WEB = dict(SPIRAL, nudge_llm=True, frozen_envelope=30.0)
 
 
-def _trimech(spiral=SPIRAL, **kw):
+def _trimech(spiral=SPIRAL, tooling=UNTOOL, **kw):
     """All three mechanisms at trimech's own parameters. `kw` carries the scaffold, if any.
 
     `spiral` selects the spiral tuning: SPIRAL for SWE-bench's long streams, SPIRAL_WEB for
@@ -77,7 +80,7 @@ def _trimech(spiral=SPIRAL, **kw):
     """
     return arm("manual4",
                lambda: cfg(injection=InjectionConfig(**INJECT),
-                           tooling=ToolingConfig(**UNTOOL),
+                           tooling=ToolingConfig(**tooling),
                            spiral=SpiralConfig(**spiral)), **kw)
 
 
@@ -124,6 +127,8 @@ MECHANISM_ARMS = {
     # ---- all three active ----------------------------------------------------------------
     # trimech = manual4 injection + evidence untooling(3)+judge + spiral guard/judge/nudge
     "trimech": _trimech(),
+    # trimech whose tool judge answers with a bare DROP list (UNTOOL_LEAN); nothing else differs
+    "trimech-lean": _trimech(tooling=UNTOOL_LEAN),
     # short Web-Bench streams add the LLM-written nudge + a cold-start frozen envelope
     "trimech-web": arm(
         "manual4",

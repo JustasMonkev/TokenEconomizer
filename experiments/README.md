@@ -108,6 +108,7 @@ The arms, by the names the paper uses:
 | `baseline`, `baseline-medium`, `baseline-low` | default execution at high, medium and low effort |
 | `rtk`, `repomap` | the fixed strategies RTK and RepoMap |
 | `trimech` (`codex-trimech` on Codex) | TokenEconomizer |
+| `trimech-lean` | `trimech` with the tool judge asked for a bare list of tools to drop (`judge_compact`); not in the paper |
 | `trimech-rtk`, `trimech-repomap` (`codex-trimech-…`) | TokenEconomizer+RTK, TokenEconomizer+RepoMap |
 | `inject-only`, `untool-only`, `spiral-only` | micro-skills, tool pruning and the failure-loop guard alone |
 | `trimech-web` | TokenEconomizer on Web-Bench, whose streams are short |

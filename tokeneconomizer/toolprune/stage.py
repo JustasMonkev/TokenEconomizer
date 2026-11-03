@@ -103,7 +103,8 @@ class ToolingStage(Stage):
                     if cand:
                         loadmap, self._task_judge_tokens = judge_tools_for_task(
                             self.problem_by_iid[iid], cand, self.judge_tool_runner,
-                            model=self.optimizer_model)
+                            model=self.optimizer_model,
+                            compact=getattr(cfg, "judge_compact", False))
                         self._task_judge_dropped = [t for t, load in loadmap.items()
                                                     if not load and t in cand]
                 exclude_tools = sorted(set(trace_excluded) | set(self._task_judge_dropped))

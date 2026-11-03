@@ -63,8 +63,24 @@ TOOL_JUDGE_DOMAIN = (
 )
 
 
+# The same decision, asked for as a bare DROP list. The per-tool `reason` the full form asks
+# for is never read, yet it is most of the answer, and an answer is billed at the output rate:
+# measured on Haiku 5.5 over a 17-tool Claude Code catalog, a ~1k-token prompt drew ~2k output
+# tokens, ~11k effective tokens a call against ~1.4k for a list of names.
+TOOL_JUDGE_COMPACT_ANSWER = (
+    "Return ONLY a JSON object {\"drop\": [\"<tool_name>\", ...]} naming the tools to DROP. "
+    "Every tool you do not name stays loaded. No reasons, no other keys.\n"
+)
+
+
+def _compact_brief(domain):
+    """The judge's brief with its answer format replaced by the bare DROP list."""
+    head = domain.split("Return ONLY")[0].rstrip() + "\n"
+    return head + TOOL_JUDGE_COMPACT_ANSWER
+
+
 def judge_tools_for_task(problem_statement, catalog, runner, model="agent",
-                         domain=None, max_issue_chars=4000):
+                         domain=None, max_issue_chars=4000, compact=False):
     """Per-task, INSTRUCTION-AWARE tool judge. Reads the (redacted) task text plus
     the candidate tool catalog ({name: desc}) and returns ({tool: load_bool}, tokens): which
     tools to LOAD for THIS task. Complements the trace-based rule — the caller unions the
@@ -74,13 +90,19 @@ def judge_tools_for_task(problem_statement, catalog, runner, model="agent",
     a solution or its tests. On any failure returns
     ({}, tokens) so the caller keeps everything loaded (safe). `tokens` is the cache-aware
     EFFECTIVE cost of this one-shot call (fresh input x1 + output x5 when approximated), on
-    the same basis as the session's own cost, so it is charged to the same ledger."""
+    the same basis as the session's own cost, so it is charged to the same ledger.
+
+    `compact=True` asks for the same decision as a bare DROP list (`TOOL_JUDGE_COMPACT_ANSWER`)
+    and maps it back onto the catalog: a tool the judge does not name is loaded."""
     if runner is None or not catalog or not problem_statement:
         return {}, 0
     brief = domain or TOOL_JUDGE_DOMAIN
+    if compact:
+        brief = _compact_brief(brief)
     prompt = (brief + "\nISSUE:\n" + problem_statement[:max_issue_chars]
               + "\n\nTOOLS:\n" + "\n".join(f"- {n}: {d}" for n, d in catalog.items())
-              + "\n\nReturn the JSON classification:")
+              + ("\n\nReturn the JSON object:" if compact
+                 else "\n\nReturn the JSON classification:"))
     try:
         raw, real = runner(prompt, model)
     except Exception:
@@ -92,9 +114,16 @@ def judge_tools_for_task(problem_statement, catalog, runner, model="agent",
     if m:
         try:
             obj = json.loads(m.group(0))
-            for t, v in obj.items():
-                load = v.get("load") if isinstance(v, dict) else v
-                out[t] = bool(load)
+            if compact:
+                drop = obj.get("drop") if isinstance(obj, dict) else None
+                if not isinstance(drop, list):
+                    return {}, tokens
+                drop = {t for t in drop if isinstance(t, str)}
+                out = {t: t not in drop for t in catalog}
+            else:
+                for t, v in obj.items():
+                    load = v.get("load") if isinstance(v, dict) else v
+                    out[t] = bool(load)
         except Exception:
             return {}, tokens
     # safety: never DROP a protected work tool, whatever the judge said.
