@@ -108,7 +108,7 @@ The arms, by the names the paper uses:
 | `baseline`, `baseline-medium`, `baseline-low` | default execution at high, medium and low effort |
 | `rtk`, `repomap` | the fixed strategies RTK and RepoMap |
 | `trimech` (`codex-trimech` on Codex) | TokenEconomizer |
-| `trimech-lean` | `trimech` with the tool judge asked for a bare list of tools to drop (`judge_compact`); not in the paper |
+| `trimech-lean` | Opt-in compact generic tool judge; not a paper arm or Codex-native judge |
 | `trimech-rtk`, `trimech-repomap` (`codex-trimech-…`) | TokenEconomizer+RTK, TokenEconomizer+RepoMap |
 | `inject-only`, `untool-only`, `spiral-only` | micro-skills, tool pruning and the failure-loop guard alone |
 | `trimech-web` | TokenEconomizer on Web-Bench, whose streams are short |
@@ -153,6 +153,14 @@ Every arm, the baseline included, runs behind an answer-key guard that blocks th
 public answers on GitHub. The rtk binary is downloaded into `$DATA/scaffolds`.
 
 ## Results
+
+The current Codex controller uses a cache-cost baseline and stable trial before retaining a
+mask, rather than the historical immediate-demotion policy. Reproducing the paper therefore
+requires its original revision, not silently comparing historical rows with the current arm.
+The local SOL checks and their limits are recorded in [the PR review](PR1_SOL_REVIEW.md) and
+[implementation follow-up](PR1_SOL_FOLLOWUP.md). `scripts/benchmark_codex_sidecalls.py` compares
+the actual old/new side-call paths; `scripts/benchmark_sol_tasks.py --cycles 2` exercises both
+the trial and its subsequent retained/restored state on small independently graded tasks.
 
 Each lane writes one results tree, `$TOKENECONOMIZER_RESULTS/<agent>_<benchmark>_<model>/`
 (for example `claude_swebench_sonnet5`), with one directory per arm and cell

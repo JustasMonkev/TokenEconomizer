@@ -96,7 +96,18 @@ class LiveController:
             ensure_launcher(self.ctx.env)
         except OSError:
             pass
+        known_session = (self.host.name == "codex"
+                         and self.store.read(self._sess_name()) is not None)
         s = self._session()
+        if self.host.name == "codex":
+            mask = sorted(denylist.applied_for(self.store, self.ctx.repo.root, "codex"))
+            if "codex_launch_mask" in s:
+                s["codex_mask_mixed"] = (bool(s.get("codex_mask_mixed"))
+                                         or s["codex_launch_mask"] != mask)
+            elif not known_session and source in ("startup", "new"):
+                s.update(codex_launch_mask=mask, codex_mask_mixed=False)
+            else:
+                s["codex_mask_mixed"] = True
         s["source"] = source
         s.setdefault("cwd", self.host.cwd(self.p, self.ctx.env))
         outputs = []

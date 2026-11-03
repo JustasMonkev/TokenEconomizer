@@ -242,14 +242,24 @@ def codex_session_usage(rollout_path):
     input total less both cache fields, and reasoning tokens are added to output."""
     total = None
     requests = 0
+    completed = False
+    models = set()
     for line in _lines(rollout_path):
-        if '"token_count"' not in line:
+        if not any(marker in line for marker in (
+                '"token_count"', '"task_complete"', '"task_started"',
+                '"turn_aborted"', '"turn_context"')):
             continue
         try:
             ev = json.loads(line)
         except ValueError:
             continue
         p = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+        if ev.get("type") == "turn_context" and isinstance(p.get("model"), str):
+            models.add(p["model"].lower())
+        if ev.get("type") == "turn_context" or p.get("type") in ("task_started", "turn_aborted"):
+            completed = False
+        elif p.get("type") == "task_complete":
+            completed = True
         if p.get("type") != "token_count":
             continue
         info = p.get("info") or {}
@@ -257,10 +267,21 @@ def codex_session_usage(rollout_path):
             total = info["total_token_usage"]
             requests += 1
     meta = codex_session_meta(rollout_path)
-    if not total:
+    incomplete = len(models) > 1
+    if total:
+        for key in ("input_tokens", "cached_input_tokens", "output_tokens", "cache_write_input_tokens",
+                    "reasoning_output_tokens"):
+            value = total.get(key, 0 if key in ("cache_write_input_tokens", "reasoning_output_tokens") else None)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                incomplete = True
+        if not incomplete and total["input_tokens"] < (
+                total["cached_input_tokens"] + total.get("cache_write_input_tokens", 0)):
+            incomplete = True
+    if not total or incomplete:
         return {"input_tokens": None, "cache_read_input_tokens": None,
                 "cache_creation_input_tokens": None, "output_tokens": None,
-                "requests": 0, "model": meta.get("model")}
+                "requests": 0, "model": meta.get("model"), "session_completed": completed,
+                "usage_incomplete": True}
     inp = int(total.get("input_tokens") or 0)
     cached = int(total.get("cached_input_tokens") or 0)
     cw = int(total.get("cache_write_input_tokens") or 0)
@@ -270,4 +291,4 @@ def codex_session_usage(rollout_path):
             "cache_creation_input_tokens": cw,
             "output_tokens": int(total.get("output_tokens") or 0) + reasoning,
             "reasoning_output_tokens": reasoning,
-            "requests": requests, "model": meta.get("model")}
+            "requests": requests, "model": meta.get("model"), "session_completed": completed}

@@ -62,8 +62,6 @@ CODEX_SPIRAL = dict(codex_spiral=True, codex_spiral_profile="defensive")
 # every pre-2026-09-12 `codex_spiral_profile` in a stored run_config resolves to.
 CODEX_SPIRAL_POSTGREEN = dict(codex_spiral=True)     # SpiralConfig's own default profile
 UNTOOL = dict(evidence=3, judge=True)              # evidence untooling + tool judge
-# The same judge asked for a bare DROP list: the decision `UNTOOL` makes, at a fraction of its
-# output (the per-tool reasons are never read). `trimech-lean` is trimech with this alone.
 UNTOOL_LEAN = dict(UNTOOL, judge_compact=True)
 SPIRAL = dict(guard=True, judge=True, nudge=True)  # spiral guard -> judge -> nudge
 # Web-Bench's streams are 20-21 tasks, too short for the within-stream p90 envelope to warm
@@ -127,7 +125,6 @@ MECHANISM_ARMS = {
     # ---- all three active ----------------------------------------------------------------
     # trimech = manual4 injection + evidence untooling(3)+judge + spiral guard/judge/nudge
     "trimech": _trimech(),
-    # trimech whose tool judge answers with a bare DROP list (UNTOOL_LEAN); nothing else differs
     "trimech-lean": _trimech(tooling=UNTOOL_LEAN),
     # short Web-Bench streams add the LLM-written nudge + a cold-start frozen envelope
     "trimech-web": arm(

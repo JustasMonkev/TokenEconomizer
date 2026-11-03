@@ -1,0 +1,41 @@
+{
+  "model": "gpt-6.1-sol",
+  "effort": "low",
+  "seed": 20261103,
+  "source_commit": "3772cb1df998707ea33b71fdc6fc87e63be1d21d",
+  "scope": "6 synthetic Python bug fixes, one paired repeat, cold-start native TE capability pruning only; no micro-skills, loop guard or relay rewriting; not SWE-bench",
+  "task_order": [
+    "cache",
+    "pagination",
+    "csv",
+    "dedupe",
+    "unicode",
+    "retry"
+  ],
+  "arms": {
+    "baseline": {
+      "runs": 6,
+      "resolved": 6,
+      "input": 386599,
+      "cached": 347392,
+      "cache_write": 0,
+      "output": 3081,
+      "total": 389680,
+      "effective": 71981.6,
+      "api_equivalent_usd": 0.14396319999999999,
+      "seconds": 102.17934333399171
+    },
+    "te_native_pruning": {
+      "runs": 6,
+      "resolved": 6,
+      "input": 281952,
+      "cached": 202880,
+      "cache_write": 0,
+      "output": 3195,
+      "total": 285147,
+      "effective": 105191.0,
+      "api_equivalent_usd": 0.21038199999999999,
+      "seconds": 111.16547866698238
+    }
+  }
+}

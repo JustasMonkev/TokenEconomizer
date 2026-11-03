@@ -1,0 +1,41 @@
+{
+  "paired_runs": 12,
+  "decision_agreement": {
+    "compact": 8,
+    "compact_lean": 7
+  },
+  "savings": {
+    "compact": {
+      "input": 0.016169430093857295,
+      "output": 0.8698270537368746,
+      "total": 0.04506326732207533,
+      "effective": 0.38959645733253967,
+      "seconds": 0.6100979963796487,
+      "all_input_fresh_equivalent": 0.1434115128777591,
+      "exploratory_paired_bootstrap_95_total": [
+        -0.02291471813621282,
+        0.10805535751305817
+      ]
+    },
+    "compact_lean": {
+      "input": 0.47856968975683645,
+      "output": 0.8869672637430512,
+      "total": 0.492392764371691,
+      "effective": 0.5441930848666084,
+      "seconds": 0.6566894540377846,
+      "all_input_fresh_equivalent": 0.5394434598476304,
+      "exploratory_paired_bootstrap_95_total": [
+        0.4482990053692457,
+        0.5320541210308674
+      ]
+    }
+  },
+  "limits": [
+    "Six hand-authored issue descriptions sampled from twelve; two repeats; seed randomizes selection/order, not model sampling.",
+    "Required-tool retention checks are narrower than end-to-end correctness.",
+    "Personal host context varied by roughly 3169 input tokens in several runs; all prompts and raw CLI usage are retained.",
+    "Cache-hit imbalance means effective-token reductions are observed totals, not isolated causal effects.",
+    "The lean-context arm is a prototype benchmark configuration, not shipped by PR #1.",
+    "ChatGPT-authenticated CLI; USD values are standard API-equivalent estimates, not actual subscription charges."
+  ]
+}

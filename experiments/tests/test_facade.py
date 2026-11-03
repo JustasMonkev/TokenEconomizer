@@ -52,17 +52,33 @@ def test_codex_arm_end_to_end(tmp_path):
     rd = str(tmp_path / "run"); os.makedirs(rd)
     write_codex_transcript(os.path.join(rd, "transcript.jsonl"),
                            [{"type": "command_execution", "command": "pytest"}])
-    row = {"resolved": True, "num_turns": 30, "tokens_total": 5000,
-           "input_tokens": 500, "cache_read_input_tokens": 4000,
-           "cache_creation_input_tokens": 200, "output_tokens": 300,
-           "codex_spiral_nudges": 0}
-    srow = {"resolved": True, "num_turns": 30}
-    opt, reason = econ.after_task(task, row, rd, srow)
-    assert reason is None                            # injection disabled
-    assert srow["codex_untool_active"] is True
-    assert srow["codex_spiral_active"] is True
-    # task 2: web should have been demoted (loaded-and-unused on task 1)
-    assert "web" in econ.build_tools(task, 1)
+    trial_masks = []
+    for i in range(6):
+        task = {"instance_id": f"x-{i}", "problem_statement": "fix concat"}
+        mask = econ.build_tools(task, i)
+        if i < 3:
+            assert mask == []
+        else:
+            assert "web" in mask
+            trial_masks.append(mask)
+        row = {"resolved": True, "model": "gpt-6.1-sol", "requests": 4,
+               "num_turns": 30, "tokens_total": 5000 if i < 3 else 4750,
+               "input_tokens": 500 if i < 3 else 250, "cache_read_input_tokens": 4000,
+               "cache_creation_input_tokens": 200, "output_tokens": 300,
+               "codex_spiral_nudges": 0}
+        srow = {"resolved": True, "num_turns": 30}
+        opt, reason = econ.after_task(task, row, rd, srow)
+        assert reason is None
+        assert srow["codex_untool_active"] is True
+        assert srow["codex_spiral_active"] is True
+        assert srow["codex_untool_cost_guard"]["phase"] == (
+            "baseline" if i < 2 else "trial" if i < 5 else "retained")
+    assert all(mask == trial_masks[0] for mask in trial_masks)
+    guard = srow["codex_untool_cost_guard"]
+    assert guard["baseline"]["effective_tokens"] == 3 * 2450
+    assert guard["trial"]["effective_tokens"] == 3 * 2200
+    assert guard["basis"]["per_request"] is True
+    assert "web" in econ.build_tools(task, 6)
 
 
 def test_codex_trimech_end_to_end(tmp_path):
@@ -99,7 +115,8 @@ def test_codex_trimech_end_to_end(tmp_path):
         task = {"instance_id": f"x-{i}", "problem_statement": "fix concat"}
         # the per-task order the driver uses: prefix -> mask -> run_kwargs -> run -> hook
         econ.injection_prefix(task)
-        econ.build_tools(task, i)
+        mask = econ.build_tools(task, i)
+        assert ("web" in mask) == (i >= 3)
         econ.run_kwargs(task)
         rd = str(tmp_path / f"run{i}"); os.makedirs(rd)
         write_codex_transcript(os.path.join(rd, "transcript.jsonl"), [
@@ -108,8 +125,9 @@ def test_codex_trimech_end_to_end(tmp_path):
             {"type": "command_execution",
              "command": '/bin/bash -lc "python -m pytest xarray/tests/test_concat.py -q"',
              "aggregated_output": "1 passed", "exit_code": 0}])
-        row = {"resolved": True, "num_turns": 30, "tokens_total": 5000,
-               "input_tokens": 500, "cache_read_input_tokens": 4000,
+        row = {"resolved": True, "model": "gpt-6.1-sol", "requests": 4,
+               "num_turns": 30, "tokens_total": 5000 if i < 3 else 4750,
+               "input_tokens": 500 if i < 3 else 250, "cache_read_input_tokens": 4000,
                "cache_creation_input_tokens": 200, "output_tokens": 300,
                "codex_spiral_nudges": 0, "codex_spiral_tool_turns": 12}
         srow = {"resolved": True, "num_turns": 30}
@@ -118,6 +136,8 @@ def test_codex_trimech_end_to_end(tmp_path):
         # all three mechanisms reported on the same row
         assert srow["codex_untool_active"] is True
         assert srow["codex_spiral_active"] is True
+        assert srow["codex_untool_cost_guard"]["phase"] == (
+            "baseline" if i < 2 else "trial" if i < 5 else "retained")
         assert "manual_facts" in srow
         assert reason and reason.startswith("envfacts")      # the composed profile
 

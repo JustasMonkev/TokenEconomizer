@@ -66,6 +66,7 @@ MODEL_WEIGHTS = {
     "gpt-5.5":                 dict(input=1.0, cache_read=0.10,   cache_write=0.0,   output=6.0),
     "gpt-5.6-luna":            dict(input=1.0, cache_read=0.10,   cache_write=1.25,  output=6.0),
     "gpt-5.6-sol":             dict(input=1.0, cache_read=0.10,   cache_write=1.25,  output=6.0),
+    "gpt-6.1-sol":             dict(input=1.0, cache_read=0.05,   cache_write=1.25,  output=5.0),
     "gpt-5.6-terra":           dict(input=1.0, cache_read=0.10,   cache_write=1.248, output=6.0),
     "mai-code-1-flash-picker": dict(input=1.0, cache_read=0.0933, cache_write=0.0,   output=6.0),
     # --- OpenAI-direct-only ids (public per-1M pricing; not in copilot catalog) ----

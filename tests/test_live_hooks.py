@@ -1210,6 +1210,7 @@ def codex_rollout(path, repo, i, exec_inputs=(), prompts=1):
         "total_token_usage": {"input_tokens": 3000, "cached_input_tokens": 2000,
                               "cache_write_input_tokens": 0, "output_tokens": 90,
                               "reasoning_output_tokens": 10}}}})
+    recs.append({"type": "event_msg", "payload": {"type": "task_complete"}})
     with open(path, "w") as fh:
         fh.write("\n".join(json.dumps(r) for r in recs) + "\n")
     return path
@@ -1322,6 +1323,127 @@ def _codex_start(env, repo, tmp_path, sid):
     t = codex_rollout(str(tmp_path / f"rollout-{sid}.jsonl"), repo, 99)
     return call(env, {"hook_event_name": "SessionStart", "session_id": sid, "source": "startup",
                       "transcript_path": t, "cwd": repo}, "codex")
+
+
+@pytest.mark.parametrize("restore_fails", [False, True])
+def test_codex_cost_regression_restores_only_its_own_settings(env, repo, tmp_path,
+                                                            codex_accepts, monkeypatch,
+                                                            restore_fails):
+    config = os.path.join(repo, ".codex", "config.toml")
+    os.makedirs(os.path.dirname(config), exist_ok=True)
+    with open(config, "w") as handle:
+        handle.write('model = "gpt-6.1-sol"\n')
+    _codex_sessions(env, repo, tmp_path)
+    st = store_for(env, repo, "codex")
+    assert denylist.applied_for(st, repo, "codex") == ["collaboration", "goals"]
+    if restore_fails:
+        restore = denylist.restore
+        attempts = []
+
+        def fail_once(*args, **kwargs):
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise RuntimeError("temporary config write failure")
+            return restore(*args, **kwargs)
+
+        monkeypatch.setattr(denylist, "restore", fail_once)
+    for i in range(5, 8):
+        path = codex_rollout(str(tmp_path / f"cost-{i}.jsonl"), repo, i, prompts=2)
+        with open(path) as handle:
+            rows = [json.loads(line) for line in handle]
+        for row in rows:
+            payload = row.get("payload", {})
+            if payload.get("type") == "token_count":
+                payload["info"]["total_token_usage"]["input_tokens"] = 30000
+                payload["info"]["total_token_usage"]["cached_input_tokens"] = 0
+        with open(path, "w") as handle:
+            handle.write("\n".join(json.dumps(row) for row in rows))
+        run_session(env, repo, f"cx{i}", path, host="codex")
+    assert st.read("untool.json")["cost_guard"]["decision"] == "rollback"
+    if restore_fails:
+        assert st.read("untool.json")["restore_error"] == "temporary config write failure"
+        assert denylist.applied_for(st, repo, "codex") == ["collaboration", "goals"]
+        path = codex_rollout(str(tmp_path / "retry-restore.jsonl"), repo, 8, prompts=2)
+        run_session(env, repo, "cx8", path, host="codex")
+    assert denylist.applied_for(st, repo, "codex") == []
+    with open(config) as handle:
+        assert handle.read() == 'model = "gpt-6.1-sol"\n'
+
+
+def test_old_codex_pruning_is_restored_before_collecting_a_priced_baseline(env, repo,
+                                                                        tmp_path, codex_accepts):
+    _codex_sessions(env, repo, tmp_path)
+    st = store_for(env, repo, "codex")
+    profile_path, = glob.glob(os.path.join(st.base, "mechanisms", "interface_state", "*", "codex_untool.json"))
+    with open(profile_path) as handle:
+        state = json.load(handle)
+    state["version"] = "old-unpriced-profile"
+    with open(profile_path, "w") as handle:
+        json.dump(state, handle)
+    path = codex_rollout(str(tmp_path / "after-upgrade.jsonl"), repo, 5, prompts=2)
+    run_session(env, repo, "after-upgrade", path, host="codex")
+    guard = st.read("untool.json")["cost_guard"]
+    assert guard["decision"] == "restore-baseline"
+    assert guard["baseline"]["samples"] == 0
+    assert denylist.applied_for(st, repo, "codex") == []
+
+
+def test_retained_codex_mask_restores_a_capability_after_completed_use(env, repo, tmp_path,
+                                                                     codex_accepts):
+    _codex_sessions(env, repo, tmp_path)
+    st = store_for(env, repo, "codex")
+    for i in range(5, 8):
+        path = codex_rollout(str(tmp_path / f"cheap-{i}.jsonl"), repo, i, prompts=2)
+        with open(path) as handle:
+            rows = [json.loads(line) for line in handle]
+        for row in rows:
+            payload = row.get("payload", {})
+            if payload.get("type") == "token_count":
+                payload["info"]["total_token_usage"]["input_tokens"] = 2100
+        with open(path, "w") as handle:
+            handle.write("\n".join(json.dumps(row) for row in rows))
+        run_session(env, repo, f"cx{i}", path, host="codex")
+    assert st.read("untool.json")["cost_guard"]["phase"] == "retained"
+    path = codex_rollout(str(tmp_path / "used-goal.jsonl"), repo, 8,
+                         exec_inputs=["await tools.get_goal({})"], prompts=2)
+    run_session(env, repo, "used-goal", path, host="codex")
+    assert denylist.applied_for(st, repo, "codex") == ["collaboration"]
+
+
+def test_unfinished_codex_sessions_do_not_authorize_pruning(env, repo, tmp_path,
+                                                           codex_accepts):
+    for i in range(8):
+        path = codex_rollout(str(tmp_path / f"unfinished-{i}.jsonl"), repo, i, prompts=2)
+        with open(path) as handle:
+            rows = [json.loads(line) for line in handle]
+        rows[-1]["payload"]["type"] = "turn_aborted"
+        with open(path, "w") as handle:
+            handle.write("\n".join(json.dumps(row) for row in rows))
+        run_session(env, repo, f"cx{i}", path, host="codex")
+    st = store_for(env, repo, "codex")
+    assert st.read("untool.json")["proposal"] == []
+    assert denylist.applied_for(st, repo, "codex") == []
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_codex_cost_evidence_uses_the_launch_mask_not_current_settings(env, repo, tmp_path,
+                                                                    codex_accepts, resume):
+    path = codex_rollout(str(tmp_path / "earlier-session.jsonl"), repo, 99, prompts=2)
+    base = {"session_id": "earlier", "transcript_path": path, "cwd": repo}
+    call(env, dict(base, hook_event_name="SessionStart", source="startup"), "codex")
+    _codex_sessions(env, repo, tmp_path)
+    st = store_for(env, repo, "codex")
+    assert denylist.applied_for(st, repo, "codex") == ["collaboration", "goals"]
+    if resume:
+        call(env, dict(base, hook_event_name="SessionStart", source="resume"), "codex")
+    call(env, dict(base, hook_event_name="SessionEnd", reason="other"), "codex")
+    guard = st.read("untool.json")["cost_guard"]
+    assert guard["trial"]["samples"] == 0
+    if resume:
+        assert guard["phase"] == "rejected"
+        assert denylist.applied_for(st, repo, "codex") == []
+    else:
+        assert guard["reason"] == "candidate-not-applied"
 
 
 def test_by_default_codex_writes_the_unused_capabilities_off_and_says_so(env, repo, tmp_path,

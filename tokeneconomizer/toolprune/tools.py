@@ -48,7 +48,7 @@ PROTECTED_TOOLS = frozenset({
 })
 
 
-TOOL_JUDGE_DOMAIN = (
+TOOL_JUDGE_POLICY = (
     "You configure the toolset for an autonomous coding agent that is about to solve ONE "
     "specific GitHub issue by READING, EDITING, and TESTING source code in a single "
     "repository, HEADLESS and SINGLE-SHOT (no human, one sealed container, no sub-agents / "
@@ -58,15 +58,14 @@ TOOL_JUDGE_DOMAIN = (
     "  LOAD = plausibly useful to read/navigate/edit/run/test code to solve THIS issue\n"
     "  DROP = this specific issue will not need it\n"
     "Be conservative: DROP only when you are confident the tool is irrelevant to THIS issue. "
-    "Do NOT assume a tool is needed merely because it exists. Return ONLY a JSON object "
+    "Do NOT assume a tool is needed merely because it exists. "
+)
+TOOL_JUDGE_FULL_ANSWER = (
+    "Return ONLY a JSON object "
     "{tool_name: {\"load\": true|false, \"reason\": \"<short>\"}}.\n"
 )
+TOOL_JUDGE_DOMAIN = TOOL_JUDGE_POLICY + TOOL_JUDGE_FULL_ANSWER
 
-
-# The same decision, asked for as a bare DROP list. The per-tool `reason` the full form asks
-# for is never read, yet it is most of the answer, and an answer is billed at the output rate:
-# measured on Haiku 5.5 over a 17-tool Claude Code catalog, a ~1k-token prompt drew ~2k output
-# tokens, ~11k effective tokens a call against ~1.4k for a list of names.
 TOOL_JUDGE_COMPACT_ANSWER = (
     "Return ONLY a JSON object {\"drop\": [\"<tool_name>\", ...]} naming the tools to DROP. "
     "Every tool you do not name stays loaded. No reasons, no other keys.\n"
@@ -74,9 +73,10 @@ TOOL_JUDGE_COMPACT_ANSWER = (
 
 
 def _compact_brief(domain):
-    """The judge's brief with its answer format replaced by the bare DROP list."""
-    head = domain.split("Return ONLY")[0].rstrip() + "\n"
-    return head + TOOL_JUDGE_COMPACT_ANSWER
+    policy = TOOL_JUDGE_POLICY if domain == TOOL_JUDGE_DOMAIN else domain
+    return (policy.rstrip() + "\nThe following output schema overrides only earlier "
+            "response-format instructions; all tool-selection policies above still apply.\n"
+            + TOOL_JUDGE_COMPACT_ANSWER)
 
 
 def judge_tools_for_task(problem_statement, catalog, runner, model="agent",
@@ -92,15 +92,15 @@ def judge_tools_for_task(problem_statement, catalog, runner, model="agent",
     EFFECTIVE cost of this one-shot call (fresh input x1 + output x5 when approximated), on
     the same basis as the session's own cost, so it is charged to the same ledger.
 
-    `compact=True` asks for the same decision as a bare DROP list (`TOOL_JUDGE_COMPACT_ANSWER`)
-    and maps it back onto the catalog: a tool the judge does not name is loaded."""
+    `compact=True` requests a DROP list; unnamed tools stay loaded. Custom domain policy
+    is preserved, with only the requested response format overridden."""
     if runner is None or not catalog or not problem_statement:
         return {}, 0
     brief = domain or TOOL_JUDGE_DOMAIN
     if compact:
         brief = _compact_brief(brief)
     prompt = (brief + "\nISSUE:\n" + problem_statement[:max_issue_chars]
-              + "\n\nTOOLS:\n" + "\n".join(f"- {n}: {d}" for n, d in catalog.items())
+              + "\n\nTOOLS:\n" + "\n".join(f"- {n}: {d}" for n, d in sorted(catalog.items()))
               + ("\n\nReturn the JSON object:" if compact
                  else "\n\nReturn the JSON classification:"))
     try:

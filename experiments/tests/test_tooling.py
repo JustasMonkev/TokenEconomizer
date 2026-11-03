@@ -29,13 +29,19 @@ def test_codex_profile_never_prunes_core(tmp_path):
     assert "deferred_wait" not in p.state["current_pruned"]
 
 
-def test_codex_profile_demotes_unused_web(tmp_path):
+def _priced_baseline(profile):
+    for i in range(cu.COST_WINDOW):
+        profile.begin_task(f"baseline-{i}")
+        profile.observe({"attempted": {}, "completed": {}, "failed": {}}, resolved=True,
+                        cost_row={"model": "gpt-5.6-sol", "input_tokens": 1000,
+                                  "cache_read_input_tokens": 0,
+                                  "cache_creation_input_tokens": 0, "output_tokens": 100})
+
+
+def test_codex_profile_trials_unused_web_after_priced_baseline(tmp_path):
     p = cu.CodexUntoolProfile("pydata/xarray", str(tmp_path), fresh=True)
-    # task 1 (audit) with web loaded-and-unused -> after observe, web becomes eligible.
-    p.begin_task("x-1")
-    p.observe({"attempted": {}, "completed": {}, "failed": {}}, resolved=True)
-    sel2 = p.begin_task("x-2")
-    # web needs only 1 unused exposure; it should now be in the pruned relay mask.
+    _priced_baseline(p)
+    sel2 = p.begin_task("trial-1")
     assert "web" in sel2["relay_capabilities"]
 
 
@@ -347,16 +353,12 @@ def test_the_recorded_tool_mask_is_the_one_the_cli_was_given(monkeypatch):
 # `goals` as a config-prunable package: the product-goal tool docs in the code-mode exec
 # description, removable with `[features] goals = false`.
 # ---------------------------------------------------------------------------------------
-def test_codex_profile_demotes_unused_goals_after_one_exposure(tmp_path):
+def test_codex_profile_trials_unused_goals_after_priced_baseline(tmp_path):
     p = cu.CodexUntoolProfile("sympy/sympy", str(tmp_path), fresh=True)
     sel1 = p.begin_task("s-1")
     assert "goals" not in sel1["config_capabilities"]          # task 1: complete contract
     p.observe({"attempted": {}, "completed": {}, "failed": {}}, resolved=True)
-    sel2 = p.begin_task("s-2")
-    # One unused exposure makes goals eligible, but at most two packages demote per task
-    # and collaboration + web go first; goals follows on the next fold.
-    assert sel2["config_capabilities"] == ["collaboration", "web"]
-    p.observe({"attempted": {}, "completed": {}, "failed": {}}, resolved=True)
+    _priced_baseline(p)
     sel3 = p.begin_task("s-3")
     assert "goals" in sel3["config_capabilities"]
     assert "goals" in sel3["logical_capabilities"]
@@ -405,13 +407,9 @@ def test_harness_emits_the_goals_toggle_and_the_cli_accepts_the_whole_mask():
     assert not err, err
 
 
-def test_codex_profile_demotes_interactive_guidance_after_one_exposure(tmp_path):
+def test_codex_profile_trials_interactive_guidance_after_priced_baseline(tmp_path):
     p = cu.CodexUntoolProfile("sympy/sympy", str(tmp_path), fresh=True)
-    seen = []
-    for i in range(4):
-        sel = p.begin_task(f"s-{i}")
-        seen.append(tuple(sel["config_capabilities"]))
-        p.observe({"attempted": {}, "completed": {}, "failed": {}}, resolved=True)
-    assert seen[0] == ()                                          # complete contract first
-    assert "interactive_guidance" in seen[2]                      # second demotion round
+    _priced_baseline(p)
+    sel = p.begin_task("trial-1")
+    assert "interactive_guidance" in sel["config_capabilities"]
     assert "interactive_guidance" not in sel["relay_capabilities"]  # config-only package

@@ -26,3 +26,12 @@ What happens at each hook, and how each agent was verified to behave, is in
 
 The installable plugin directory -- manifests, hook files and launchers -- is `plugin/` at the
 repository root; see `plugin/README.md` there and `docs/PLUGIN.md`.
+
+Codex optimizer side calls keep the user's provider, authentication, model, and Codex home.
+When the installed CLI validates the configuration offline, per-call overrides replace the
+base instructions with a short text-helper prompt and suppress project documents, discovered
+skills, supported tool features, plugins/apps, and MCP servers. Temporary instructions are
+removed after the call; user settings and interactive sessions are not edited. Compatibility
+probes and inference share the caller's timeout, and a failed paid call is never retried.
+Unsupported CLI/configuration combinations use the previous invocation. Native tool schemas
+without a supported toggle may remain; this is lean context, not a universal no-tools API.
