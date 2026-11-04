@@ -5,9 +5,11 @@ request-user-input, deferred wait, planning, ...) whose schemas and guidance are
 every request. This controller removes the packages a repository's sessions do not use:
 
   * A fresh repository starts on the COMPLETE contract (its first session sees everything).
-  * After each completed session, at most two independently-observed packages are demoted,
-    using ONLY earlier sessions' evidence. A single completed use PERMANENTLY protects a
-    package.
+  * Three complete, priced baseline sessions precede one stable trial mask. The mask is
+    retained only when three trial sessions show lower cache-weighted cost on the same
+    model and quality basis. A session that cannot be compared is skipped, not counted.
+    This observational guard is not a matched causal estimate.
+    A single completed use PERMANENTLY protects a package.
   * Higher-risk packages (image/media, skills) need more loaded-but-unused exposures before
     demotion than collaboration or web.
   * Narrow task-text hints and sparse single-package probes restore one package before a
@@ -26,10 +28,12 @@ request rewrites is the caller's job (`plugin.denylist` writes a project's `.cod
 import copy
 import hashlib
 import json
+import math
 import os
 import re
 from collections import Counter
 from tokeneconomizer.names import repo_filename
+from tokeneconomizer import pricing
 
 
 # ===========================================================================
@@ -272,7 +276,6 @@ MIN_LOADED_EXPOSURES = {
     "request_user_input": 2,
     "image_media": 3,
 }
-MAX_DEMOTIONS_PER_TASK = 2
 RECENT_WINDOW = 3
 
 # Native config carries a supported toggle for these; web/image are also relay-pruned
@@ -301,7 +304,10 @@ PROBE_PRIORITY = (
     "image_media", "skills", "request_user_input", "web", "collaboration", "goals",
     "interactive_guidance")
 
-PROFILE_VERSION = "codex-recent-experience-untool-indirect-use-core"
+PROFILE_VERSION = "codex-cache-cost-stable-trial-v1"
+COST_WINDOW = 3
+# Trial sessions that could not be compared (see _cost_decision) before the trial is restored.
+MAX_TRIAL_SKIPS = 3 * COST_WINDOW
 RETAINED_CAPABILITIES = ("apply_patch", "exec_command", "planning", "write_stdin")
 
 
@@ -316,11 +322,12 @@ def relay_capabilities(logical_capabilities):
 def _contract_fingerprint():
     return hashlib.sha256(json.dumps({
         "profile": PROFILE_VERSION,
+        "cost_window": COST_WINDOW,
+        "max_trial_skips": MAX_TRIAL_SKIPS,
         "evidence_candidates": _EVIDENCE_CANDIDATES,
         "candidates": CANDIDATE_CAPABILITIES,
         "core_capabilities": CORE_CAPABILITIES,
         "min_loaded_exposures": MIN_LOADED_EXPOSURES,
-        "max_demotions_per_task": MAX_DEMOTIONS_PER_TASK,
         "recent_window": RECENT_WINDOW,
         "config_capabilities": sorted(CONFIG_CAPABILITIES),
         "relay_capabilities": _RELAY_CAPABILITIES,
@@ -334,7 +341,7 @@ CONTRACT_FINGERPRINT = _contract_fingerprint()
 
 
 class CodexUntoolProfile:
-    """Persistent, repository-scoped, causal full-to-pruned Codex untool controller.
+    """Persistent, repository-scoped Codex controller with an observational cost guard.
 
     Usage per task (the ToolingStage drives this):
         p = CodexUntoolProfile(repo, results_root, fresh=...)
@@ -377,6 +384,12 @@ class CodexUntoolProfile:
             "probe_cursor": 0,
             "transitions": [],
             "history": [],
+            "cost_guard": {"phase": "baseline", "decision": "hold",
+                           "reason": "collect-baseline", "basis": None, "candidate": [],
+                           "baseline": {"samples": 0, "effective_tokens": 0, "requests": 0,
+                                        "observations": []},
+                           "trial": {"samples": 0, "effective_tokens": 0, "requests": 0,
+                                     "observations": []}},
         }
 
     def _load(self):
@@ -384,9 +397,15 @@ class CodexUntoolProfile:
             loaded = json.load(open(self.path, encoding="utf-8"))
         except (OSError, ValueError, TypeError):
             return
+        if not isinstance(loaded, dict) or loaded.get("repo") != self.repo:
+            return
         if (loaded.get("version") != PROFILE_VERSION
-                or loaded.get("contract_fingerprint") != CONTRACT_FINGERPRINT
-                or loaded.get("repo") != self.repo):
+                or loaded.get("contract_fingerprint") != CONTRACT_FINGERPRINT):
+            prior_uses = loaded.get("ever_completed")
+            if isinstance(prior_uses, list):
+                self.state["ever_completed"] = sorted({
+                    name for name in prior_uses
+                    if isinstance(name, str) and name in _EVIDENCE_CANDIDATES})
             return
         state = self._new_state()
         state.update(loaded)
@@ -448,15 +467,168 @@ class CodexUntoolProfile:
             outcomes = list(recent.get(capability) or ())
             if len(outcomes) >= needed and "completed" not in outcomes[-needed:]:
                 eligible.append(capability)
-        return eligible[:MAX_DEMOTIONS_PER_TASK]
+        return eligible
+
+    def _cost_sample(self, row, resolved):
+        if not isinstance(row, dict) or row.get("usage_incomplete") or row.get("is_error"):
+            return None, "incomplete-cost-usage"
+        if resolved is None and row.get("session_completed") is not True:
+            return None, "session-not-completed"
+        if resolved is not None and not isinstance(resolved, bool):
+            return None, "unknown-quality-basis"
+        if not isinstance(row.get("model"), str) or not row["model"].strip():
+            return None, "unpriced-model"
+        for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
+                    "output_tokens"):
+            value = row.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return None, "incomplete-cost-usage"
+            if not math.isfinite(value) or value < 0:
+                return None, "invalid-cost-usage"
+        requests = row.get("requests")
+        if requests is not None and (isinstance(requests, bool)
+                                     or not isinstance(requests, int) or requests <= 0):
+            return None, "invalid-request-count"
+        try:
+            weights = pricing.weights_for(row)
+            effective = pricing.effective_tokens(row, weights=weights)
+        except ValueError:
+            return None, "unpriced-model"
+        if not math.isfinite(effective) or effective <= 0:
+            return None, "invalid-cost-usage"
+        return {"effective_tokens": effective, "requests": requests or 0,
+                "basis": {"model": row["model"].lower(), "weights": weights,
+                          "quality": "graded-success" if resolved is True else "completed-session",
+                          "per_request": requests is not None}}, None
+
+    def _cost_decision(self, row, resolved, current, protected):
+        """The cost guard's step for one finished session; returns the mask for the next.
+
+        Only a measured signal ends a trial for good: a known failure, a trial package used,
+        or three comparable trial sessions that cost no less than the baseline. A session that
+        cannot be compared -- usage incomplete (a resumed session, a mixed launch mask, a model
+        switched mid-session), a turn left unfinished, another model or price -- is skipped and
+        does not count. A trial that stays unmeasured for `MAX_TRIAL_SKIPS` sessions is
+        restored rather than kept on without evidence."""
+        guard = self.state["cost_guard"]
+        phase = guard["phase"]
+        guard["decision"] = "hold"
+
+        def rollback(reason):
+            guard.update(phase="rejected", decision="rollback", reason=reason)
+            return set()
+
+        def skip(reason):
+            guard["reason"] = reason
+            if phase == "trial":
+                window = guard["trial"]
+                window["skipped"] = int(window.get("skipped", 0) or 0) + 1
+                if window["skipped"] >= MAX_TRIAL_SKIPS:
+                    return rollback("trial-unmeasured")
+            return current
+
+        if phase == "rejected":
+            guard["decision"] = "rollback"
+            return set()
+        actual = set(self._pending.get("logical_capabilities") or ())
+        if phase == "baseline" and actual:
+            guard.update(decision="restore-baseline", reason="baseline-not-applied")
+            return set()
+        if resolved is False:
+            if phase in ("trial", "retained"):
+                return rollback("task-failed")
+            guard["reason"] = "task-failed"       # not counted; earlier baseline samples stay
+            return set()
+        sample, error = self._cost_sample(row, resolved)
+        if error:
+            return skip(error)
+        if guard["basis"] is not None and sample["basis"] != guard["basis"]:
+            if phase in ("trial", "retained"):
+                return skip("cost-basis-changed")
+            guard["baseline"] = {"samples": 0, "effective_tokens": 0, "requests": 0,
+                                 "observations": []}
+        guard["basis"] = sample["basis"]
+        if phase == "retained":
+            if actual == current:
+                guard.update(decision="retain", reason="stable-observed-cost-improvement")
+            else:
+                guard["reason"] = "retained-mask-not-applied"
+            return current
+        expected = set(guard["candidate"]) if phase == "trial" else set()
+
+        def shrink(kept, reason):
+            # The trial goes on with what is still applied, from no samples, since the earlier
+            # ones ran under a larger mask.
+            guard.update(candidate=sorted(kept), reason=reason,
+                         trial={"samples": 0, "effective_tokens": 0, "requests": 0,
+                                "observations": [], "skipped": 0})
+            return set(kept)
+
+        if phase == "trial":
+            # A package the host can no longer apply -- given back by the person -- leaves the
+            # trial. With none left, the guard starts over from a fresh baseline.
+            available = self._pending.get("available_capabilities")
+            available = set(expected if available is None else available)
+            given_back = expected - available - actual
+            if given_back:
+                expected = current = shrink(expected - given_back, "candidate-given-back")
+                if not expected:
+                    guard.update(phase="baseline", decision="hold",
+                                 baseline={"samples": 0, "effective_tokens": 0, "requests": 0,
+                                           "observations": []})
+                    return set()
+        if phase == "trial" and actual and actual < expected:
+            hinted = set(self._pending.get("task_hints") or ())
+            if expected - actual <= hinted:
+                return skip("candidate-hinted")      # this task's text asked for a package
+            expected = current = shrink(actual, "candidate-shrunk")   # a mask applied in part
+        if phase == "trial" and expected & protected:
+            return rollback("candidate-capability-used")
+        if actual != expected:
+            if actual:     # ran a mask the trial did not choose: not comparable
+                return skip("candidate-mask-changed")
+            guard["reason"] = "candidate-not-applied"    # proposed, not applied yet
+            return current
+        window = guard[phase]
+        observations = window["observations"] + [{"effective_tokens": sample["effective_tokens"],
+                                                  "requests": sample["requests"]}]
+        window["observations"] = observations[-COST_WINDOW:]
+        window["samples"] = len(window["observations"])
+        window["effective_tokens"] = sum(s["effective_tokens"] for s in window["observations"])
+        window["requests"] = sum(s["requests"] for s in window["observations"])
+        if window["samples"] < COST_WINDOW:
+            guard["reason"] = "collect-" + phase
+            return current
+        if phase == "baseline":
+            available = set(self._pending["available_capabilities"])
+            candidate = sorted(set(self._eligible_demotions(current, protected)) & available)
+            if not candidate:
+                guard["reason"] = "no-eligible-capabilities"
+                return current
+            guard.update(phase="trial", decision="trial", reason="priced-baseline-stable-trial",
+                         candidate=candidate)
+            return set(candidate)
+        baseline = guard["baseline"]
+        improves = window["effective_tokens"] / window["samples"] < (
+            baseline["effective_tokens"] / baseline["samples"])
+        if sample["basis"]["per_request"]:
+            improves = improves and window["effective_tokens"] / window["requests"] < (
+                baseline["effective_tokens"] / baseline["requests"])
+        if not improves:
+            return rollback("no-observed-cost-improvement")
+        guard.update(phase="retained", decision="retain", reason="observed-cost-improvement")
+        return current
 
     # ---- per-task selection ----------------------------------------------
-    def begin_task(self, task_id, *, problem_statement=""):
+    def begin_task(self, task_id, *, problem_statement="", available_capabilities=None):
         """Freeze a mask using ONLY state from already-completed tasks."""
         completed = int(self.state.get("tasks_completed", 0) or 0)
         hints = task_hints(problem_statement)
-        logical = set(self.state.get("current_pruned") or ()) - set(hints)
-        probe = self._choose_probe(logical, hints)
+        available = (set(CANDIDATE_CAPABILITIES) if available_capabilities is None
+                     else set(available_capabilities) & set(CANDIDATE_CAPABILITIES))
+        logical = (set(self.state.get("current_pruned") or ()) & available) - set(hints)
+        probe = (self._choose_probe(logical, hints)
+                 if self.state["cost_guard"]["phase"] == "retained" else None)
         if probe:
             logical.discard(probe)
         logical = sorted(logical)
@@ -486,6 +658,8 @@ class CodexUntoolProfile:
             "tasks_completed_before": completed,
             "core_capabilities": list(CORE_CAPABILITIES),
             "retained_capabilities": retained,
+            "available_capabilities": sorted(available),
+            "cost_guard": copy.deepcopy(self.state["cost_guard"]),
         }
         return copy.deepcopy(self._pending)
 
@@ -503,7 +677,7 @@ class CodexUntoolProfile:
         self.state["transitions"] = transitions[-128:]
 
     # ---- fold one completed trace into state (affects the NEXT task only) --
-    def observe(self, usage, *, resolved=None):
+    def observe(self, usage, *, resolved=None, cost_row=None):
         pending = self._pending
         if pending is None:
             raise RuntimeError("observe() called without begin_task()")
@@ -561,17 +735,20 @@ class CodexUntoolProfile:
                                  "targeted-probe-produced-completed-use",
                                  pending.get("task_id"))
 
-        newly_pruned = self._eligible_demotions(current_pruned, protected)
-        current_pruned.update(newly_pruned)
+        previous_pruned = set(current_pruned)
+        current_pruned = self._cost_decision(cost_row, resolved, current_pruned, protected)
+        newly_pruned = sorted(current_pruned - previous_pruned)
         current_pruned.difference_update(protected)
         current_pruned &= set(CANDIDATE_CAPABILITIES)   # core never pruned
         before = int(self.state.get("tasks_completed", 0) or 0)
         self.state["tasks_completed"] = before + 1
         self.state["current_pruned"] = sorted(current_pruned)
         self.state["ever_completed"] = sorted(protected)
-        self._transition("gradual-demotion", newly_pruned,
-                         "recent-loaded-exposures-with-zero-completed-use",
+        self._transition("cost-trial", newly_pruned,
+                         "priced-baseline-stable-trial",
                          pending.get("task_id"))
+        self._transition("cost-restore", previous_pruned - current_pruned,
+                         self.state["cost_guard"]["reason"], pending.get("task_id"))
         self._transition("completed-protect", completed_now,
                          "completed-use-permanently-protected",
                          pending.get("task_id"))
@@ -596,6 +773,7 @@ class CodexUntoolProfile:
                        for c in _EVIDENCE_CANDIDATES},
             "newly_pruned": sorted(newly_pruned),
             "mask_after": list(self.state["current_pruned"]),
+            "cost_guard": copy.deepcopy(self.state["cost_guard"]),
         }
         history = list(self.state.get("history") or ())
         history.append(record)

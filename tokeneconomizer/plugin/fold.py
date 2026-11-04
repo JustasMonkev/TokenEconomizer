@@ -220,9 +220,8 @@ def _fold_toolprune_codex(ctx, adapter, session_id, transcript, workdir, prompts
         (a plugin launches nothing), so the observation is recorded against the applied set;
       * a package is proposed only once the profile has demoted it AND it was loaded, and
         unused, long enough by `enough_evidence` (x3 for image/media, the high-risk package),
-        with no use ever -- the profile alone demotes collaboration after one unused task, which
-        was right for a sealed benchmark stream and is too quick for a person's sessions. The
-        profile counts sessions; the prompts are counted here (`loaded_prompts`)."""
+        with no use ever. The profile also requires a priced baseline and stable cost trial.
+        The profile counts sessions; the prompts are counted here (`loaded_prompts`)."""
     from tokeneconomizer.config import ToolingConfig
     from tokeneconomizer.toolprune import ToolingStage
     if not transcript or not workdir:
@@ -236,20 +235,45 @@ def _fold_toolprune_codex(ctx, adapter, session_id, transcript, workdir, prompts
     stage = ToolingStage(ToolingConfig(codex_untool=True), "codex", "agent", adapter=adapter,
                          repo=ctx.repo.label, results_root=ctx.mech_dir, fresh=False)
     stage._warned_no_catalog = True
-    stage.build_tools({"instance_id": session_id}, 0)
     applied = denylist.applied_for(ctx.store, ctx.repo.root, ctx.host.name)
     kept = set(denylist.kept_for(ctx.store, ctx.repo.root, ctx.host.name))   # given back
-    stage.codex_profile._pending["logical_capabilities"] = sorted(applied)
     loaded_before = dict(stage.codex_profile.state.get("loaded_exposures") or {})
-    srow = {}
-    stage.after_task({"instance_id": session_id}, {}, run_dir, srow)
-    state = stage.codex_profile.state
-    ever_used = set(state.get("ever_completed") or ())
-    loaded = state.get("loaded_exposures") or {}
+    session = ctx.store.read(os.path.join("sessions", f"{session_id}.json")) or {}
+    launch_mask = session.get("codex_launch_mask")
+    known_mask = (isinstance(launch_mask, list)
+                  and all(isinstance(c, str) and c in denylist.CODEX_LIVE_CAPABILITIES
+                          for c in launch_mask))
     prior = ctx.store.read("untool.json") or {}
     # A session from before prompts were counted counts as one prompt.
     loaded_prompts = dict(prior.get("loaded_prompts") or
                           {c: int(n) for c, n in loaded_before.items()})
+    available = [c for c in denylist.CODEX_LIVE_CAPABILITIES
+                 if c in applied or (c not in kept and enough_evidence(
+                     int(loaded_before.get(c, 0)) + 1,
+                     int(loaded_prompts.get(c, 0)) + (1 if prompts is None else prompts),
+                     ctx.config, high_risk=c in CODEX_HIGH_RISK))]
+    task = {"instance_id": session_id, "codex_available_capabilities": available}
+    stage.build_tools(task, 0)
+    stage.codex_profile._pending["logical_capabilities"] = sorted(launch_mask if known_mask else applied)
+    srow = {"resolved": None}
+    cost_row = dict(ctx.host.session_usage(transcript))
+    if not known_mask or session.get("codex_mask_mixed"):
+        cost_row["usage_incomplete"] = True
+    stage.after_task(task, cost_row, run_dir, srow)
+    state = stage.codex_profile.state
+    guard = srow.get("codex_untool_cost_guard") or {}
+    restored = []
+    restore_error = None
+    restore = set(applied) & set(state.get("ever_completed") or ())
+    if guard.get("decision") in ("rollback", "restore-baseline"):
+        restore.update(set(applied) - set(state.get("current_pruned") or ()))
+    if restore and not ctx.config.shadow:
+        try:
+            restored = denylist.restore(ctx.repo.root, ctx.store, sorted(restore), host="codex")
+        except RuntimeError as exc:
+            restore_error = str(exc)
+    ever_used = set(state.get("ever_completed") or ())
+    loaded = state.get("loaded_exposures") or {}
     for c in denylist.CODEX_LIVE_CAPABILITIES:
         if int(loaded.get(c, 0)) > int(loaded_before.get(c, 0)):     # loaded this session
             loaded_prompts[c] = int(loaded_prompts.get(c, 0)) + (1 if prompts is None
@@ -268,13 +292,14 @@ def _fold_toolprune_codex(ctx, adapter, session_id, transcript, workdir, prompts
                                 "used": c in ever_used}
                             for c in denylist.CODEX_LIVE_CAPABILITIES},
            "loaded_prompts": loaded_prompts,
-           "proposal": proposal, "updated": time.time(),
+           "proposal": proposal, "updated": time.time(), "cost_guard": guard,
+           "restore_error": restore_error,
            "new_in_proposal": sorted(set(proposal) - set(prior.get("proposal", [])))}
     if ctx.config.toolprune == "auto" and proposal and not ctx.config.shadow:
         _hold(doc, prior, proposal, ctx.repo.root)
     ctx.store.write("untool.json", doc)
     return {"proposal": doc["proposal"], "pending": bool(doc.get("auto_pending")),
-            "restored": []}
+            "restored": restored, "cost_guard": guard, "restore_error": restore_error}
 
 
 def _hold(doc, prior, proposal, root):

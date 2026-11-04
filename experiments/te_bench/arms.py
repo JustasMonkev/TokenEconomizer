@@ -29,7 +29,7 @@ __all__ = ["ARMS", "SCAFFOLD_ARMS", "ARM_ORDER", "Arm", "arm", "cfg"]
 ARM_ORDER = (
     "baseline", "baseline-medium", "baseline-low",
     "inject-only", "untool-only", "spiral-only", "spiral-only-web",
-    "trimech", "trimech-web",
+    "trimech", "trimech-lean", "trimech-web",
     "codex-untool", "codex-spiral", "codex-spiral-postgreen", "codex-spiral-defensive",
     "codex-combo", "codex-inject", "codex-inject-untool",
     "codex-inject-envfacts", "codex-inject-distiller", "codex-trimech", "codex-trimech-rtk",

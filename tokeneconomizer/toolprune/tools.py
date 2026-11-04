@@ -48,7 +48,7 @@ PROTECTED_TOOLS = frozenset({
 })
 
 
-TOOL_JUDGE_DOMAIN = (
+TOOL_JUDGE_POLICY = (
     "You configure the toolset for an autonomous coding agent that is about to solve ONE "
     "specific GitHub issue by READING, EDITING, and TESTING source code in a single "
     "repository, HEADLESS and SINGLE-SHOT (no human, one sealed container, no sub-agents / "
@@ -58,13 +58,34 @@ TOOL_JUDGE_DOMAIN = (
     "  LOAD = plausibly useful to read/navigate/edit/run/test code to solve THIS issue\n"
     "  DROP = this specific issue will not need it\n"
     "Be conservative: DROP only when you are confident the tool is irrelevant to THIS issue. "
-    "Do NOT assume a tool is needed merely because it exists. Return ONLY a JSON object "
+    "Do NOT assume a tool is needed merely because it exists. "
+)
+TOOL_JUDGE_FULL_ANSWER = (
+    "Return ONLY a JSON object "
     "{tool_name: {\"load\": true|false, \"reason\": \"<short>\"}}.\n"
+)
+TOOL_JUDGE_DOMAIN = TOOL_JUDGE_POLICY + TOOL_JUDGE_FULL_ANSWER
+
+# The same decision, asked for as a bare DROP list. The per-tool `reason` the full form asks
+# for is never read, yet it is most of the answer, and an answer is billed at the output rate.
+TOOL_JUDGE_COMPACT_ANSWER = (
+    "Return ONLY a JSON object {\"drop\": [\"<tool_name>\", ...]} naming the tools to DROP. "
+    "Every tool you do not name stays loaded. No reasons, no other keys.\n"
 )
 
 
+def _compact_brief(domain):
+    """The judge's brief with the DROP-list answer. A custom domain is kept whole, since its
+    policy and its answer format cannot be told apart reliably; the closing line says the new
+    format replaces any earlier one."""
+    policy = TOOL_JUDGE_POLICY if domain == TOOL_JUDGE_DOMAIN else domain
+    return (policy.rstrip() + "\nThe following output schema overrides only earlier "
+            "response-format instructions; all tool-selection policies above still apply.\n"
+            + TOOL_JUDGE_COMPACT_ANSWER)
+
+
 def judge_tools_for_task(problem_statement, catalog, runner, model="agent",
-                         domain=None, max_issue_chars=4000):
+                         domain=None, max_issue_chars=4000, compact=False):
     """Per-task, INSTRUCTION-AWARE tool judge. Reads the (redacted) task text plus
     the candidate tool catalog ({name: desc}) and returns ({tool: load_bool}, tokens): which
     tools to LOAD for THIS task. Complements the trace-based rule — the caller unions the
@@ -74,13 +95,19 @@ def judge_tools_for_task(problem_statement, catalog, runner, model="agent",
     a solution or its tests. On any failure returns
     ({}, tokens) so the caller keeps everything loaded (safe). `tokens` is the cache-aware
     EFFECTIVE cost of this one-shot call (fresh input x1 + output x5 when approximated), on
-    the same basis as the session's own cost, so it is charged to the same ledger."""
+    the same basis as the session's own cost, so it is charged to the same ledger.
+
+    `compact=True` requests a DROP list; unnamed tools stay loaded. Custom domain policy
+    is preserved, with only the requested response format overridden."""
     if runner is None or not catalog or not problem_statement:
         return {}, 0
     brief = domain or TOOL_JUDGE_DOMAIN
+    if compact:
+        brief = _compact_brief(brief)
     prompt = (brief + "\nISSUE:\n" + problem_statement[:max_issue_chars]
-              + "\n\nTOOLS:\n" + "\n".join(f"- {n}: {d}" for n, d in catalog.items())
-              + "\n\nReturn the JSON classification:")
+              + "\n\nTOOLS:\n" + "\n".join(f"- {n}: {d}" for n, d in sorted(catalog.items()))
+              + ("\n\nReturn the JSON object:" if compact
+                 else "\n\nReturn the JSON classification:"))
     try:
         raw, real = runner(prompt, model)
     except Exception:
@@ -92,9 +119,16 @@ def judge_tools_for_task(problem_statement, catalog, runner, model="agent",
     if m:
         try:
             obj = json.loads(m.group(0))
-            for t, v in obj.items():
-                load = v.get("load") if isinstance(v, dict) else v
-                out[t] = bool(load)
+            if compact:
+                drop = obj.get("drop") if isinstance(obj, dict) else None
+                if not isinstance(drop, list):
+                    return {}, tokens
+                drop = {t for t in drop if isinstance(t, str)}
+                out = {t: t not in drop for t in catalog}
+            else:
+                for t, v in obj.items():
+                    load = v.get("load") if isinstance(v, dict) else v
+                    out[t] = bool(load)
         except Exception:
             return {}, tokens
     # safety: never DROP a protected work tool, whatever the judge said.

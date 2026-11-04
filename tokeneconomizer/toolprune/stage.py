@@ -78,7 +78,8 @@ class ToolingStage(Stage):
         # Codex path: freeze the capability mask; the runner maps it to prune-items.
         if self.codex_profile is not None:
             self._codex_selection = self.codex_profile.begin_task(
-                iid, problem_statement=task.get("problem_statement", ""))
+                iid, problem_statement=task.get("problem_statement", ""),
+                available_capabilities=task.get("codex_available_capabilities"))
             self._exclude_tools = list(
                 self._codex_selection.get("relay_capabilities") or ())
             return list(self._exclude_tools)
@@ -103,7 +104,7 @@ class ToolingStage(Stage):
                     if cand:
                         loadmap, self._task_judge_tokens = judge_tools_for_task(
                             self.problem_by_iid[iid], cand, self.judge_tool_runner,
-                            model=self.optimizer_model)
+                            model=self.optimizer_model, compact=cfg.judge_compact)
                         self._task_judge_dropped = [t for t, load in loadmap.items()
                                                     if not load and t in cand]
                 exclude_tools = sorted(set(trace_excluded) | set(self._task_judge_dropped))
@@ -143,7 +144,7 @@ class ToolingStage(Stage):
         if self.codex_profile is not None:
             selection = self._codex_selection or {}
             usage = cu.inspect_usage(transcript)
-            record = self.codex_profile.observe(usage, resolved=srow.get("resolved"))
+            record = self.codex_profile.observe(usage, resolved=srow.get("resolved"), cost_row=row)
             srow["codex_untool_active"] = True
             srow["codex_untool_profile"] = cu.PROFILE_VERSION
             srow["codex_untool_reason"] = selection.get("reason")
@@ -158,6 +159,7 @@ class ToolingStage(Stage):
             srow["codex_untool_usage_attempted"] = record["attempted"]
             srow["codex_untool_usage_completed"] = record["completed"]
             srow["codex_untool_adapt_tokens"] = 0
+            srow["codex_untool_cost_guard"] = record["cost_guard"]
             return 0
 
         # ---- evidence pruning bookkeeping ----

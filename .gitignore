@@ -47,3 +47,6 @@ experiments/figures/
 
 # Pi installs this repository as a package and runs `npm install` in its checkout.
 /package-lock.json
+
+# Benchmark summaries written by experiments/scripts (run outputs).
+experiments/reports/

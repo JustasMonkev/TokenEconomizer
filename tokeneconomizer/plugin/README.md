@@ -26,3 +26,16 @@ What happens at each hook, and how each agent was verified to behave, is in
 
 The installable plugin directory -- manifests, hook files and launchers -- is `plugin/` at the
 repository root; see `plugin/README.md` there and `docs/PLUGIN.md`.
+
+Codex optimizer side calls keep the user's provider, authentication, model, and Codex home.
+When the installed CLI validates the configuration offline, per-call overrides replace the
+base instructions with a short text-helper prompt and suppress project documents, discovered
+skills, supported tool features, plugins/apps, and MCP servers. Temporary instructions are
+removed after the call; user settings and interactive sessions are not edited. Compatibility
+probes use at most a quarter of the caller's timeout and their answer is remembered per CLI
+binary, Codex config and skill set (`hosts/codex/lean-sidecall.json` under the state root;
+a day, or an hour after a failed probe); a
+CLI that cannot take the overrides is noted once in errors.log. A failed paid call is never
+retried. An MCP server whose name is not a bare TOML key stays on.
+Unsupported CLI/configuration combinations use the previous invocation. Native tool schemas
+without a supported toggle may remain; this is lean context, not a universal no-tools API.
