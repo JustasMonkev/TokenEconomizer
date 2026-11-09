@@ -247,13 +247,27 @@ def test_a_resumed_copilot_session_gets_back_the_facts_it_started_with(env, repo
 
 
 # ---- the spiral guard --------------------------------------------------------------------
+def claude_failed(output, code=1):
+    """A failed Claude Code call as it arrives: a PostToolUseFailure `error` naming the exit
+    code, and no `tool_response`. Claude Code reports a success with no exit code, which the
+    plugin reads as 0 (#128), so a failing run is never a PostToolUse."""
+    return {"error": f"Exit code {code}\n{output}"}
+
+
+def _post(base, name, args, result, rkey="tool_response"):
+    if isinstance(result, dict) and set(result) == {"error"}:
+        return dict(base, hook_event_name="PostToolUseFailure", tool_name=name, tool_input=args,
+                    error=result["error"])
+    return dict(base, hook_event_name="PostToolUse", tool_name=name, tool_input=args,
+                **{rkey: result})
+
+
 def _turn(env, repo, sid, key, calls, host=None):
     """One prompt-turn through UserPromptSubmit -> PostToolUse* -> Stop; outputs per call."""
     idk = "turn_id" if host == "codex" else "prompt_id"
     base = {"session_id": sid, "transcript_path": "", "cwd": repo, idk: key}
     call(env, dict(base, hook_event_name="UserPromptSubmit", prompt="go"), host)
-    outs = [call(env, dict(base, hook_event_name="PostToolUse", tool_name=n, tool_input=i,
-                           tool_response=r), host) for n, i, r in calls]
+    outs = [call(env, _post(base, n, i, r), host) for n, i, r in calls]
     call(env, dict(base, hook_event_name="Stop", stop_hook_active=False), host)
     return outs
 
@@ -273,7 +287,7 @@ def stuck_calls(n, host=None):
             fail = "FAILED tests/test_a.py::test_x - AssertionError: assert 1 == 2"
             out.append(("exec_command", {"command": "pytest -q"}, {"output": fail, "exit_code": 1})
                        if host == "codex" else
-                       ("Bash", {"command": "pytest -q"}, {"stdout": fail, "stderr": ""}))
+                       ("Bash", {"command": "pytest -q"}, claude_failed(fail)))
     return out
 
 
@@ -309,8 +323,7 @@ def _guard_turn(env, repo, sid, key, calls, host):
         base[idk] = key
     rkey = "tool_result" if host == "copilot" else "tool_response"
     call(env, dict(base, hook_event_name="UserPromptSubmit", prompt="go"), host)
-    outs = [call(env, dict(base, hook_event_name="PostToolUse", tool_name=n, tool_input=i,
-                           **{rkey: r}), host) for n, i, r in calls]
+    outs = [call(env, _post(base, n, i, r, rkey), host) for n, i, r in calls]
     call(env, dict(base, hook_event_name="Stop", stop_hook_active=False), host)
     return outs
 
@@ -474,7 +487,7 @@ def _warm(env, repo):
 
 
 def test_only_turns_that_end_green_feed_the_envelope(env, repo):
-    fail = {"stdout": "FAILED tests/test_a.py::t - AssertionError", "stderr": ""}
+    fail = claude_failed("FAILED tests/test_a.py::t - AssertionError")
     _turn(env, repo, "s", "red", [("Edit", {"file_path": "/r/a.py"}, "ok"),
                                   ("Bash", {"command": "pytest -q"}, fail)])
     _turn(env, repo, "s", "green", [("Edit", {"file_path": "/r/a.py"}, "ok"),
@@ -1515,6 +1528,20 @@ def test_codex_never_overrides_a_key_the_user_set(tmp_path):
     # a header the plugin added, under which the user has since put a key, is kept
     kept = denylist._toml_remove('[agents]  # t\nenabled = false  # t\nmax_threads = 4\n', ["# t"])
     assert kept == "[agents]  # t\nmax_threads = 4\n"
+
+
+def test_codex_apply_does_not_record_a_capability_the_user_already_set(repo, tmp_path,
+                                                                     codex_accepts):
+    st = Store(str(tmp_path / "st"))
+    path = denylist.settings_path(repo, "codex")
+    os.makedirs(os.path.dirname(path))
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("[features]\ngoals = true\n")
+    assert denylist.apply(repo, ["goals"], st, host="codex") == []
+    assert denylist.applied(st) == []
+    assert open(path, encoding="utf-8").read() == "[features]\ngoals = true\n"
+    assert denylist.apply(repo, ["goals", "image_media"], st, host="codex") == ["image_media"]
+    assert denylist.applied(st) == ["image_media"]
 
 
 def test_codex_trust_is_read_from_the_users_config(tmp_path, repo):

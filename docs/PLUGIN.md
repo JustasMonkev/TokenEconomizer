@@ -1,7 +1,7 @@
 # The plugin: design and verified agent behaviour
 
 How the plugin runs the three mechanisms inside your own Claude Code, Codex, Copilot CLI, Pi,
-opencode, Cursor and Hermes Agent sessions, through the hooks (on Pi, the extension events) each agent
+opencode, Cursor, Grok Build, Hermes Agent and Antigravity CLI sessions, through the hooks (on Pi, the extension events) each agent
 exposes: what it does at each hook, what differs from the experiments and why, the agent
 behaviour each choice rests on, where its state lives, and its known limitations. The code is `tokeneconomizer/plugin/` (what
 the hooks run) and `plugin/` (the packaging for each agent). To install and use it, see
@@ -70,6 +70,15 @@ for `toolprune apply`, and the next session start says so.
 
 Every hook fails open: any error becomes an empty output (no change) and a traceback in
 `~/.tokeneconomizer/errors.log`. The hooks are stdlib only, and none waits on a model call.
+
+One session's hooks run one at a time (`plugin/hookqueue.py`): an agent that calls tools in
+parallel starts their hooks together, and each one rewrites the session document. A hook that gets
+no lock within a few seconds saves its event to the session's queue and answers nothing, and
+whoever holds the lock applies the queue. `SessionStart`, and `UserPromptSubmit` under
+`repomap=on`, answer with context, so they are not queued: they wait, and then run without the
+lock. A decision the guard reaches on a queued call has no answer to go in, so it waits on the turn
+and the turn's next call acts on it, a call late. A turn that ends first drops it (an `undelivered`
+event): no nudge is counted, and there is no one left to redirect.
 
 ## 2. What changes relative to the experimental setting
 
@@ -318,6 +327,38 @@ settings would be):
 * Not yet exercised: `pi install git:github.com/…` against GitHub itself, which needs the
   root manifest pushed.
 
+**opencode 1.19.5 and 2.2.0 — verified live, 2026-10-29** (scripted local model endpoint; on
+1.19.5 also the free `opencode/big-pickle`; the 2.x entry also runs against 2.2.5 in CI):
+
+* Like Pi, opencode has no hook protocol: `plugin/opencode/tokeneconomizer.ts` speaks the
+  dispatcher's on opencode's behalf. One file serves both generations — 1.x reads its `server`
+  entry, 2.x its `setup` — mapping opencode's events onto the same `te-hook --host opencode`
+  calls: on 1.x `session.created`, `chat.message`, `experimental.chat.system.transform`,
+  `tool.execute.after`, `session.idle` and `session.deleted`; on 2.x `ctx.session.hook("prompt",
+  …)` for prompt admission, `ctx.session.hook("context", …)` for the manual's system-prompt
+  injection, `ctx.tool.hook("execute.after", …)`, and the public event stream
+  (`ctx.event.subscribe()`). A 2.x release missing one hook still loads the rest.
+* End to end on both: the plugin loaded, sessions folded with real usage and model, facts
+  learned over five sessions reached the next session through the system prompt, the loop
+  guard's judge nudged a failing edit-and-test loop and the redirect arrived in the model's
+  next tool results; on 1.19.5 the still-stuck notice printed on `opencode run` and the first
+  notice showed as a TUI toast, and a session quit with Ctrl+D was folded by the next start.
+* Session logs: on 1.x the plugin exports the session with `opencode export` at every turn's
+  end. On 2.x (no `opencode export`) it records the session from the event stream itself; on
+  2.2.5 that copy came out empty for every session (#118), so an empty copy is never kept over
+  a fuller one and the fold retries with 2.x's own `opencode session export`, run in the
+  session's project directory (2026-11-02).
+* A turn's end on 2.x arrives as `session.execution.{succeeded,failed,interrupted}` or the
+  documented `session.idle`; either alone closes the turn once.
+* opencode 2.x runs plugins in its background service, which on Windows has no console: every
+  child the hooks start carries `windowsHide` (the per-hook console windows flickered while the
+  agent worked, fixed 2026-10-31), and a `TE_*` variable set in the terminal reaches the plugin
+  only after `opencode service restart`.
+* Model side calls run `opencode run` with `--pure` (1.x) or `--standalone` (2.x, so the shared
+  service's other plugins — this one included — cannot fire inside them) and `bash`, `edit`,
+  `webfetch`, `websearch` denied; a `read`, `task` or `*` denial stalls 1.19.5 at start-up. On
+  2.x a reply that used no tool carries no usage, so its cost is estimated.
+
 **End to end, as a new user, 2026-10-14** — on each agent a fresh home followed `README.md` and
 this plugin's guide step by step (Claude Code 2.1.300, Codex 0.153.1, Copilot CLI 1.0.83, Pi
 1.2.0; every model through OpenRouter; a small Python repository where `pytest` is missing and
@@ -523,6 +564,22 @@ reported. Replayed through the guard, the recorded SWE-bench sessions end well i
 turns on Claude Code (13,312 sessions), 84.5% on Copilot (6,710) and 87.8% on Codex (2,653), and
 the judge's gate opens in 18.1%, 15.8% and 5.8% of them.
 
+**What a successful Claude Code call exited with, 2026-11-04 (#128).** Claude Code gives a
+successful call no exit status and reports a non-zero exit only as a failure (`PostToolUseFailure`
+live, `is_error` in its log: of about 8,100 Bash results in one machine's logs, no success named
+an exit code). So every successful call was read by its output: a passing Playwright run that
+prints libuv's `Assertion failed` as it exits, or source read with `cat` that mentions an
+`Error`, counted as failing. A successful shell call now counts as exit 0 where that status
+covers the command: one command, an `&&` chain, or one whose earlier commands only read, move
+about, set up or report (`loopguard.turn.exit_status_covers`); `python repro.py | tail` is still
+read by its output. Two more: a file put back with `git checkout --` or `git restore` counts as
+an edit only when the turn edited it, and every test run the turn's tracker knows (Playwright,
+`npx vitest`, behind `dotenv … --`) counts among the redirect's verifications. Replayed through
+the guard, 3,806 recorded SWE-bench sessions on Claude Code had 7,730 failing outputs before and
+4,660 after; the judge's gate opened in 9.7% of them instead of 11.9%, 82 read as stuck instead
+of 113, and 91.6% ended well either way. Over 682 interactive turns the failing outputs went
+from 1,586 to 594 and the turns that opened the gate from 68 to 25.
+
 The plugin's proposer prompt lists each fact it holds with its claim, so a fact it has is not
 authored again under a new id; the experiments' prompt names the ids alone, as the paper ran it.
 
@@ -580,6 +637,54 @@ was not.)
 * **Tool pruning** is not offered. Config is per profile, project plugins are not loaded, and a
   portable Agent Plugin carries no hooks. `llm_request` middleware did remove a tool from the wire
   (20 to 19), and `sessions.tool_names` records each session's list, so it is a possible route.
+
+**Grok Build 1.0.70 -- verified 2026-11-05**, from its docs (`user-guide/10-hooks.md`, `09-plugins.md`,
+`14-headless-mode.md`) and from hook payloads and session files of live `grok -p` runs:
+
+* **It runs Claude Code plugins**, `~/.claude/plugins` included, and their hooks (`security-guidance`
+  and `explanatory-output-style` appeared in a session's hook log). So this plugin, installed for
+  Claude Code, already ran inside grok sessions with no `--host` and was read as Claude Code. Every
+  payload carries both spellings of each field (`hookEventName` = `post_tool_use` and
+  `hook_event_name` = `PostToolUse`, `sessionId` / `session_id`, `toolResult` / `tool_response`,
+  `transcriptPath` / `transcript_path`); `hookEventName`, which Claude Code never sends, and a
+  `transcript_path` under `/.grok/sessions/` identify it. The hook environment adds
+  `GROK_HOOK_EVENT` and `GROK_SESSION_ID`, which count only when the payload names no transcript
+  (they are inherited by a Claude Code started from a grok shell).
+* **Output channels, checked by injecting codewords and asking the model.** `SessionStart` reads
+  only a top-level `systemMessage`, shown to the person; its `additionalContext` never reached the
+  model. An allowing `UserPromptSubmit` hook's output is discarded. A `PostToolUse` (and
+  `PostToolUseFailure`) `hookSpecificOutput.additionalContext` reaches the model, in a system
+  reminder naming the hook, capped at 10,000 characters; it is stored in the session as a synthetic
+  user message, so a resumed session has it. `systemMessage` is documented as shown only from
+  `SessionStart`, so a notice on a tool event goes through the model too (`relays_notices`). The
+  plugin therefore sets the start context aside at `SessionStart` and delivers it with the first
+  tool result (`Grok.render`).
+* **Turns.** One `grok -p` run fires `SessionStart` (source `new`), `UserPromptSubmit`, `PostToolUse`
+  per call, `Stop` (reason `end_turn`), `SessionEnd`, then a second observe-only `Stop` (reason
+  `shutdown`, no `promptId`) that the plugin ignores. `promptId` is on `UserPromptSubmit` and `Stop`
+  only, so a turn stays open from the prompt to its `Stop`. `StopCancelled` (interrupt, declined
+  permission, `--max-turns`) and `StopFailure` (API error) are not in the Claude hook file, since
+  Claude Code's loader may reject event names it does not know (not checked); an interrupted turn
+  is closed by the next prompt. A non-zero shell exit is a normal `PostToolUse`.
+* **Tool results are tagged objects**: a shell result is `{type: "Bash", output: [byte values],
+  output_for_prompt: "exit: N\n...", exit_code, timed_out, ...}`, `ReadFile`, `GrepSearch`
+  (`exit_code` 1 for no match), `ListDir`, `SearchReplace` and `WebFetch` carry their text one level
+  down. Past 128 KiB the value is a plain string. Tool names are grok's own (`run_terminal_command`,
+  `read_file`, `search_replace`, `grep`, `list_dir`); `trace.grok_tool` maps them to the names the
+  mechanisms read.
+* **Session files.** `~/.grok/sessions/<url-encoded cwd>/<id>/updates.jsonl` is an ACP log
+  (`user_message_chunk`, `tool_call`, `tool_call_update`, `turn_completed`); `usage.json` beside it
+  holds the session's tokens. `inputTokens` includes the cached reads (40,650 = 10,442 fresh +
+  30,208 cached) and `outputTokens` the reasoning tokens; `grok -p --output-format json` reports
+  `input_tokens` without the cache.
+* **Hook commands.** The Claude hook file's `"${CLAUDE_PLUGIN_ROOT}/scripts/te-hook"` runs through
+  a shell (a double-quoted path holding `$`), with `CLAUDE_PLUGIN_ROOT` set as an alias of grok's
+  own; grok's default timeout for an observe hook is 5 s, so `SessionStart`'s explicit 15 s matters.
+* **Not exercised.** Plugin slash commands under grok, `grok plugin install` from this repository
+  (the docs show `grok plugin install <name> --trust` for a marketplace plugin, and plugins off until
+  enabled), and `--resume` delivery of the start context.
+* **Side call, verified on 1.0.70.** With the side call's flags, the run's recorded tool list held
+  only `read_file`, and a prompt asking it to create a file left none.
 
 ## 4. State and privacy
 
@@ -639,7 +744,7 @@ by default with the guard), of micro-skills (its proposer, when it is on), and, 
 it, of `toolprune measure` on Claude Code. Those calls send
 **digests** — command templates, edited file basenames, error lines with paths and numbers
 masked, never file contents — through your own agent CLI (`claude -p` / `codex exec` /
-`copilot -p` / `pi -p` / `opencode run` / `hermes chat`), billed where your session is. The proposer keeps the digests of the last eight
+`copilot -p` / `pi -p` / `opencode run` / `grok -p` / `hermes chat`), billed where your session is. The proposer keeps the digests of the last eight
 sessions with its state, raw commands and output capped, so that each run sees more than the
 session that just ended. Sessions imported from Claude Code's history call no model, but their
 digests join that window, so the proposer's next call can include digests of sessions from
@@ -669,15 +774,50 @@ open-vocabulary. On a repository you do not trust, leave micro-skills off (the d
   redirect but the backstop's, which still counts.
 * **Pi** — tool pruning is not planned there, since Pi declares only four tools by default.
 * **Cursor Agent (experimental)** — hook event mapping follows Cursor's published hook schemas.
-  Cursor 3.24.9 loaded the local plugin, but hook delivery from a live Agent session has not been
-  verified. Cursor's transcript format is undocumented, and its hook payloads do not expose
-  session token usage. The adapter records prompt and tool events for learning and loop detection;
+  Cursor 3.24.9 loaded the local plugin. Verified on `cursor-agent` 2026.11.05 (macOS) with
+  `cursor-agent --trust -p`: `sessionStart`, `postToolUse`, `afterShellExecution` and `sessionEnd`
+  are delivered; `beforeSubmitPrompt` and `stop` are not (registered, never fired), and
+  `postToolUseFailure` was not exercised. An `additional_context` reply to both `sessionStart` and
+  `postToolUse` reaches the model. `transcript_path` is null on `sessionStart` and the first
+  `postToolUse`, then Cursor's own log. Without `beforeSubmitPrompt` the first tool call opens the
+  turn, the prompt count is read from the user rows of Cursor's own transcript, and a `sessionEnd`
+  reporting `completed` closes the open turn as normal. The interactive TUI has not been tested.
+  Cursor's transcript format is undocumented, and its hook payloads do not expose
+  session token usage (the `-p` JSON result has it; hooks never see it). The adapter records prompt and tool events for learning and loop detection;
   session and side-call costs are reported as unavailable. Tool pruning is not implemented for
   Cursor. macOS and Linux only: Windows Cursor runs hooks through PowerShell, and the launcher
   is a POSIX shell script.
+* **opencode (experimental)** — verified on 1.19.5, 2.2.0 and 2.2.5 (CI), not in the 2.x
+  terminal UI. On 2.x the loop guard's notices go to the server's stderr because plugins cannot
+  toast there; opencode has no deny-list settings file, so tool pruning does not apply (as on
+  Pi), and a TUI quit is only noticed by the next session's start.
+* **Grok Build (experimental)** — micro-skills and the loop guard, on 1.0.70. No tool pruning. The
+  start context reaches the model only with the session's first tool call (a session with none
+  never gets it), and the ledger counts it as injected from `SessionStart`. A turn interrupted
+  with Ctrl+C is closed by the next prompt, not by an event. Side calls leave a session under
+  `~/.grok/sessions/`; xAI models are priced on the fallback curve.
 * **Hermes Agent** — experimental: micro-skills and the loop guard, on the classic CLI and one-shot
   runs, verified with a scripted model and one free real model. Its limits are listed in
   `plugin/README.md`.
+* **Antigravity CLI (`agy`, experimental)** — micro-skills' LLM-free facts, written against
+  agy 1.5.1 and its own installed hook documentation; tool pruning is not implemented. The
+  plugin makes no model call through `agy`, which has no option that runs a prompt with every tool
+  off (`sidecall.NO_SIDE_CALLS`), so the paid proposer and the loop guard's judge never run. What
+  was captured live: hooks come from a `hooks.json` at the plugin root, run through `sh -c` in
+  that directory, with camelCase payloads that name no event (the hook file's command does,
+  `--event`) and leave out a zero (`invocationNum` 0, the first model call of a prompt). A
+  `PreToolUse` hook that prints `{}` makes agy deny the tool, so none is registered;
+  `PostToolUse` carries no tool result and a matcher `"*"` never matches, so the results are read
+  from the conversation's `transcript_full.jsonl` at the next `PreInvocation` and at `Stop`, where
+  every result of the previous model call is already written (`trace/antigravity.py`). There is no
+  prompt event and no `SessionEnd`: a prompt is the `PreInvocation` with `invocationNum` 0, and a
+  conversation is folded by the next session start in its repository once its transcript has been
+  quiet for ten minutes. Context goes back as `injectSteps`: a persistent `systemMessage` at
+  `SessionStart`, an `ephemeralMessage` (dropped after the turn) at `PreInvocation`. Calls a subagent
+  makes are not in the transcript and are not seen. Transcript token fields are absent from older
+  agy versions (unknown, not zero), and the transcript names no model, so session cost is priced
+  on the ledger's labelled fallback. macOS and Linux only: agy runs hook commands through
+  `cmd /c` on Windows, and the launcher is a POSIX shell script.
 * **Known gaps:**
   * `codex exec` prints no hook messages, so a headless Codex run shows no notice; `te status`
     counts it afterwards. On Claude Code the notice reaches the conversation and `claude -p`'s
@@ -685,8 +825,6 @@ open-vocabulary. On a repository you do not trust, leave micro-skills off (the d
     the detailed transcript (Ctrl+O) always has it.
   * A turn that ran no recognised verification counts as ended green, so a failed turn without
     one can enter the envelope and loosen the guard for every later turn.
-  * The free fact layer has no family for "this tool is absent here, with no working
-    alternative" (a missing `ruff`, `mypy` or `pre-commit`, say).
   * Test runs launched from a script are not recognised as verification.
   * `refresh-catalog` is manual, once per machine and agent; until it runs, evidence pruning
     sees only the tools sessions used (plus, on Claude Code, the deferred ones). Running it at

@@ -93,7 +93,10 @@ def load_calls(fp):
                 order.append(b.get("id"))
             elif b.get("type") == "tool_result":
                 cont = b.get("content")
-                txt = cont if isinstance(cont, str) else json.dumps(cont)
+                if isinstance(cont, list):
+                    txt = "\n".join(x.get("text", "") for x in cont if isinstance(x, dict))
+                else:
+                    txt = cont if isinstance(cont, str) else json.dumps(cont)
                 res[b.get("tool_use_id")] = txt
     return [(uses[t][0].lower(), uses[t][1], res.get(t, "")) for t in order]
 
@@ -623,7 +626,14 @@ class Distiller:
                                        {i: f.claim for i, f in self.facts.items()},
                                        set(self.extractors), excerpts, external=external,
                                        generic=self.generic)
-        raw, eff = self.runner(prompt, self.model)
+        # A side call that fails (a CLI error, a timeout) skips this tick instead of aborting the
+        # fold, as the loop guard's judge does (#131). It still counts as the tick: a runner
+        # that keeps failing is tried every PROPOSE_EVERY sessions, not at every fold.
+        try:
+            raw, eff = self.runner(prompt, self.model)
+        except Exception:
+            self.last_propose = self.now
+            return
         if eff is not None:
             self.opt_tokens += eff
         exts, facts = parse_payload(raw)

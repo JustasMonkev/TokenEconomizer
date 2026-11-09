@@ -33,6 +33,8 @@ def claude_calls(lines):
             ev = json.loads(line)
         except Exception:
             continue
+        if not isinstance(ev, dict):
+            continue
         if ev.get("type", "assistant") not in CONVERSATION:
             continue
         msg = ev.get("message") or {}
@@ -53,8 +55,8 @@ def claude_calls(lines):
                 tid = b.get("tool_use_id")
                 c = b.get("content")
                 if isinstance(c, list):
-                    c = " ".join(x.get("text", "") for x in c
-                                 if isinstance(x, dict))
+                    c = "\n".join(x.get("text", "") for x in c
+                                  if isinstance(x, dict))
                 results[tid] = (c if isinstance(c, str) else "",
                                 not b.get("is_error", False))
     for tid in order:
@@ -293,7 +295,7 @@ def claude_session_usage(transcript_path, include_subagents=True):
                 ev = json.loads(line)
             except ValueError:
                 continue
-            if ev.get("type") != "assistant":
+            if not isinstance(ev, dict) or ev.get("type") != "assistant":
                 continue
             msg = ev.get("message") or {}
             usage = msg.get("usage")
