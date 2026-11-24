@@ -81,6 +81,31 @@ def test_a_slow_ranked_map_falls_back_to_the_cached_one(env, repo, tmp_path):
     assert text.startswith("# Repository map") and "ranked toward []" in text
 
 
+@pytest.mark.parametrize("can_rank", [True, False])
+def test_prompt_uses_the_named_python_not_the_cached_maps_producer(
+        env, repo, tmp_path, can_rank):
+    e = _env(env, tmp_path, mode="start")
+    producer = e["TE_REPOMAP_PYTHON"]
+    start, _ = _session(e, repo, "first", [])
+    cached = _ctx_text(start)
+    assert "ranked toward []" in cached
+
+    replacement = tmp_path / "replacement"
+    replacement.write_text('#!/bin/sh\nif [ "$1" = "-c" ]; then exit 0; fi\n'
+                           'if [ -z "$4" ] || [ "$CAN_RANK" = "0" ]; then exit 1; fi\n'
+                           'echo "replacement ranked toward [$4]"\n')
+    replacement.chmod(replacement.stat().st_mode | stat.S_IEXEC)
+    e.update(TE_REPOMAP="on", TE_REPOMAP_PYTHON=str(replacement), TE_REPOMAP_TOKENS="512",
+             CAN_RANK=str(int(can_rank)))
+    _, prompts = _session(e, repo, "next", ["Fix `new_symbol`"])
+    state = repomap.read_state(LiveContext.build(HOSTS["claude"](), repo, e))
+    assert state["error"] and state["python"] == producer
+    if can_rank:
+        assert "replacement ranked toward [new_symbol]" in _ctx_text(prompts[0])
+    else:
+        assert _ctx_text(prompts[0]) == cached
+
+
 def test_codex_and_start_mode_get_the_cached_map_at_session_start(env, repo, tmp_path):
     start, outs = _session(_env(env, tmp_path), repo, "c1", ["Fix `x_y`"], host="codex")
     assert _ctx_text(start).startswith("# Repository map")

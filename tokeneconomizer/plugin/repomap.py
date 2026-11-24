@@ -211,8 +211,9 @@ def for_prompt(ctx, prompt):
     """(block, how) for the first prompt of a session: a map ranked toward the prompt if it can
     be made in time, else the cached one."""
     idents = prompt_idents(prompt)
-    python = read_state(ctx).get("python")
-    if idents and python:
+    producer = read_state(ctx).get("python")
+    if idents and producer:
+        python = ctx.config.repomap_python or producer
         text, err = generate(ctx, python, idents, timeout=ctx.config.repomap_timeout)
         if text.strip():
             return HEADER + text, "prompt"
