@@ -146,12 +146,13 @@ def test_session_retries_a_failed_refresh_without_relabeling_the_cached_map(
     e = dict(env, TE_REPOMAP="start", TE_REPOMAP_PYTHON=sys.executable,
              TE_REPOMAP_TOKENS="512")
     monkeypatch.setattr(repomap, "_has_aider", lambda py, env: env.get("FAIL") != "probe")
-    generator = tmp_path / "generator.py"
-    generator.write_text("import os, subprocess, sys\n"
-                         "if os.getenv('FAIL') == 'generator': sys.exit('generator failed')\n"
-                         "print(subprocess.check_output(['git', 'rev-parse', 'HEAD'], "
-                         "text=True).strip(), sys.argv[2])\n")
-    monkeypatch.setattr(repomap, "GEN", str(generator))
+
+    def generate(ctx, python):
+        if ctx.env.get("FAIL") == "generator":
+            return "", "generator failed"
+        return f"{git('rev-parse', 'HEAD')} {ctx.config.repomap_tokens}", ""
+
+    monkeypatch.setattr(repomap, "generate", generate)
 
     def session(sid):
         start, _ = _session(e, str(root), sid, [])
