@@ -156,27 +156,28 @@ def refresh(ctx):
     t0 = time.time()
     commit = head_commit(ctx.repo.root)
     python = find_python(ctx)
-    if not python:
+    if python:
+        text, err = generate(ctx, python)
+    else:
         named = ctx.config.repomap_python
-        state = dict(read_state(ctx), commit=commit, updated=time.time(), error=(
-            f"repomap_python {named} cannot import aider" if named else
-            "no Python with aider found (install aider-chat, or set repomap_python)"))
-        _write_state(ctx, state)
-        return state
-    text, err = generate(ctx, python)
-    state = {"commit": commit, "python": python, "map": text, "chars": len(text),
-             "tokens_budget": ctx.config.repomap_tokens, "secs": round(time.time() - t0, 1),
-             "error": err or None, "updated": time.time()}
-    if not text and read_state(ctx).get("map"):
-        prior = read_state(ctx)
-        state.update(map=prior["map"], chars=len(prior["map"]), commit=prior.get("commit"))
+        text = ""
+        err = (f"repomap_python {named} cannot import aider" if named else
+               "no Python with aider found (install aider-chat, or set repomap_python)")
+    if text.strip():
+        state = {"commit": commit, "python": python, "map": text, "chars": len(text),
+                 "tokens_budget": ctx.config.repomap_tokens, "secs": round(time.time() - t0, 1)}
+    else:
+        # Keep the last usable map together with the commit and budget that produced it.
+        state = read_state(ctx)
+        err = err or "generator returned an empty map"
+    state.update(error=err or None, updated=time.time())
     _write_state(ctx, state)
     return state
 
 
 def stale(ctx):
     s = read_state(ctx)
-    return (not s.get("map") or s.get("commit") != head_commit(ctx.repo.root)
+    return (bool(s.get("error")) or not s.get("map") or s.get("commit") != head_commit(ctx.repo.root)
             or s.get("tokens_budget") != ctx.config.repomap_tokens)
 
 

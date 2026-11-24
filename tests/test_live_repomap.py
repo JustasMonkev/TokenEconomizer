@@ -10,6 +10,8 @@ import pytest
 
 from tokeneconomizer.plugin import repomap
 from tokeneconomizer.plugin.config import LiveConfig
+from tokeneconomizer.plugin.context import LiveContext
+from tokeneconomizer.plugin.hosts import HOSTS
 from tests.test_live_hooks import call, env, repo  # noqa: F401
 
 FAKE = """#!/bin/sh
@@ -98,10 +100,68 @@ def test_a_named_python_without_aider_is_reported_not_replaced(env, repo, tmp_pa
     e = _env(env, tmp_path, probe=1)
     start, outs = _session(e, repo, "s1", ["Fix `x_y`"])
     assert _ctx_text(start) == "" and _ctx_text(outs[0]) == ""     # nothing breaks
-    from tokeneconomizer.plugin.context import LiveContext
-    from tokeneconomizer.plugin.hosts import HOSTS
     st = repomap.read_state(LiveContext.build(HOSTS["claude"](), repo, e))
     assert "cannot import aider" in st["error"] and not st.get("map")
+
+
+@pytest.mark.parametrize("failure", ["probe", "generator"])
+def test_session_retries_a_failed_refresh_without_relabeling_the_cached_map(
+        failure, env, tmp_path, monkeypatch):
+    root = tmp_path / "project"
+    root.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-c", "user.name=Test", "-c",
+                                        "user.email=test@example.org", *args], cwd=root,
+                                       text=True).strip()
+
+    git("init", "-q")
+    git("commit", "--allow-empty", "-qm", "first")
+    first_commit = git("rev-parse", "HEAD")
+    e = dict(env, TE_REPOMAP="start", TE_REPOMAP_PYTHON=sys.executable,
+             TE_REPOMAP_TOKENS="512")
+    monkeypatch.setattr(repomap, "_has_aider", lambda py, env: env.get("FAIL") != "probe")
+    generator = tmp_path / "generator.py"
+    generator.write_text("import os, subprocess, sys\n"
+                         "if os.getenv('FAIL') == 'generator': sys.exit('generator failed')\n"
+                         "print(subprocess.check_output(['git', 'rev-parse', 'HEAD'], "
+                         "text=True).strip(), sys.argv[2])\n")
+    monkeypatch.setattr(repomap, "GEN", str(generator))
+
+    def session(sid):
+        start, _ = _session(e, str(root), sid, [])
+        return _ctx_text(start)
+
+    original = session("first")
+    assert f"{first_commit} 512" in original
+    if failure == "probe":
+        git("commit", "--allow-empty", "-qm", "second")
+    else:
+        e["TE_REPOMAP_TOKENS"] = "1024"
+    e["FAIL"] = failure
+    assert session("fallback") == original
+    ctx = LiveContext.build(HOSTS["claude"](), str(root), e)
+    cached = repomap.read_state(ctx)
+    assert cached["error"]
+    assert (cached["commit"], cached["tokens_budget"]) == (first_commit, 512)
+    del e["FAIL"]
+    recovered = session("recovered")
+    assert recovered != original
+    assert f"{git('rev-parse', 'HEAD')} {e['TE_REPOMAP_TOKENS']}" in recovered
+    assert not repomap.read_state(ctx)["error"]
+
+
+def test_session_repairs_a_legacy_cache_that_looks_current_despite_a_failed_refresh(
+        env, repo, tmp_path):
+    e = _env(env, tmp_path, mode="start")
+    first, _ = _session(e, repo, "first", [])
+    ctx = LiveContext.build(HOSTS["claude"](), repo, e)
+    state = repomap.read_state(ctx)
+    repomap._write_state(ctx, dict(state, map="old map", chars=7, error="earlier failure"))
+    repaired, _ = _session(e, repo, "retry", [])
+    assert "ranked toward" in _ctx_text(first)
+    assert _ctx_text(repaired) == _ctx_text(first)
+    assert not repomap.read_state(ctx)["error"]
 
 
 def test_prompt_identifiers():
